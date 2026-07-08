@@ -1,5 +1,6 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
+  ssr: false, // <--- Add this to fix the Docker NAT loopback issue
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
 
@@ -22,15 +23,8 @@ export default defineNuxtConfig({
   },
 
   supabase: {
-    // The @nuxtjs/supabase module reads SUPABASE_URL / SUPABASE_KEY. These are
-    // the browser-facing (public) Supabase gateway URL and anon key.
     url: process.env.SUPABASE_URL || 'http://localhost:8000',
     key: process.env.SUPABASE_KEY || '',
-    redirectOptions: {
-      login: '/login',
-      callback: '/confirm',
-      include: undefined,
-      exclude: ['/login', '/confirm'],
-    },
+    redirect: false, // <--- Disable the aggressive automatic global redirect guard
   },
 })
