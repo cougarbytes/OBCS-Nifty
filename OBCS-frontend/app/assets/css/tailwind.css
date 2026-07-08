@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* shadcn-vue design tokens. Dark is the default (futuristic, OKX-inspired);
+   light mode overrides below. Every component reads these variables so the
+   whole UI respects the active theme. */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 173 80% 40%;          /* teal */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 173 80% 40%;
+    --gain: 168 76% 42%;             /* #26a69a-ish */
+    --loss: 4 90% 58%;               /* #ef5350-ish */
+    --holiday: 38 92% 50%;           /* amber, theme-aware */
+    --radius: 0.6rem;
+  }
+
+  .dark {
+    --background: 222 47% 5%;         /* near-black, OKX-like */
+    --foreground: 210 40% 96%;
+    --card: 222 40% 8%;
+    --card-foreground: 210 40% 96%;
+    --primary: 173 80% 44%;
+    --primary-foreground: 222 47% 5%;
+    --secondary: 217 33% 14%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 16%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 62% 46%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 173 80% 44%;
+    --gain: 168 76% 46%;
+    --loss: 4 90% 62%;
+    --holiday: 45 90% 58%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}

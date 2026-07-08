@@ -1,0 +1,37 @@
+_format_version: "2.1"
+_transform: true
+
+# Declarative Kong gateway config for the Supabase API surface.
+# Exposes GoTrue (/auth), PostgREST (/rest) and Realtime (/realtime) on :8000.
+# The anon/service keys are validated downstream by each service's JWT secret.
+
+services:
+  - name: auth-v1
+    url: http://auth:9999/
+    routes:
+      - name: auth-v1-route
+        strip_path: true
+        paths:
+          - /auth/v1/
+    plugins:
+      - name: cors
+
+  - name: rest-v1
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-route
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+
+  - name: realtime-v1
+    url: http://realtime:4000/socket/
+    routes:
+      - name: realtime-v1-route
+        strip_path: true
+        paths:
+          - /realtime/v1/
+    plugins:
+      - name: cors

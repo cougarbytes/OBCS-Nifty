@@ -1,0 +1,301 @@
+package strategy
+
+import (
+	"math"
+	"time"
+)
+
+// Params are the resolved strategy inputs for one live session. They map 1:1
+// from config.StrategyConfig so the live engine and the backtest share
+// behaviour.
+type Params struct {
+	Underlying     string
+	LotSize        int
+	Lots           int
+	StrikeStep     int
+	StrikeDistPct  float64
+	DTETarget      int
+	RiskFreeRate   float64
+	DivYield       float64
+	HVWindow       int
+	UseDynamicHV   bool
+	FixedIV        float64
+	IVMult         float64
+	IVAdd          float64
+	SkewPts        float64
+	UseEMAFilter   bool
+	EMAPeriod      int
+	UseExpiryCal   bool
+	ExpiryWeekday  string
+	InitialCapital float64
+
+	UseAGC    bool
+	KellyMult float64
+	AGCWindow int
+	MaxLots   int
+
+	Costs CostParams
+}
+
+// SpreadGreeks bundles per-leg and net Greeks for the bull call spread.
+type SpreadGreeks struct {
+	Long  Greeks `json:"long"`  // bought K1 call
+	Short Greeks `json:"short"` // sold K2 call
+	Net   Greeks `json:"net"`   // long minus short
+}
+
+// netGreeks derives the spread-level (long minus short) sensitivities.
+func netGreeks(long, short Greeks) Greeks {
+	return Greeks{
+		Price: long.Price - short.Price,
+		Delta: long.Delta - short.Delta,
+		Gamma: long.Gamma - short.Gamma,
+		Theta: long.Theta - short.Theta,
+		Vega:  long.Vega - short.Vega,
+		// A spread does not have one IV; expose the long-leg IV as reference.
+		IV: long.IV,
+	}
+}
+
+// EntryPlan is the fully-specified overnight trade the engine wants to open.
+type EntryPlan struct {
+	ShouldEnter bool         `json:"should_enter"`
+	Reason      string       `json:"reason,omitempty"`
+	EntrySpot   float64      `json:"entry_spot"`
+	K1          int          `json:"k1"`
+	K2          int          `json:"k2"`
+	DTE         int          `json:"dte_days"`
+	Expiry      time.Time    `json:"expiry"`
+	SigmaATM    float64      `json:"sigma_atm"`
+	C1Exec      float64      `json:"c1_exec"`       // slipped long-leg premium (points)
+	C2Exec      float64      `json:"c2_exec"`       // slipped short-leg premium (points)
+	EntryDebit  float64      `json:"entry_debit"`   // net premium in points
+	DebitPerLot float64      `json:"debit_per_lot"` // rupees
+	Lots        int          `json:"lots"`
+	MarginUsed  float64      `json:"margin_used"` // rupees of premium at risk
+	KellyF      float64      `json:"kelly_f"`
+	Greeks      SpreadGreeks `json:"greeks"` // model (computed) Greeks at entry
+}
+
+// ExitResult is the realized outcome of closing an overnight spread.
+type ExitResult struct {
+	ExitSpot   float64      `json:"exit_spot"`
+	C1Exec     float64      `json:"c1_exec"`
+	C2Exec     float64      `json:"c2_exec"`
+	ExitValue  float64      `json:"exit_value"`
+	GrossPnL   float64      `json:"gross_pnl"`
+	Costs      float64      `json:"costs"`
+	NetPnL     float64      `json:"net_pnl"`
+	ReturnRisk float64      `json:"return_on_risk"`
+	Greeks     SpreadGreeks `json:"greeks"` // model Greeks at exit
+}
+
+// Engine evaluates the OBCS strategy for live/paper trading. It is stateless;
+// all account state (equity, recent returns) is passed in per call so the same
+// engine can serve the runner and the on-demand "computed Greeks" endpoint.
+type Engine struct {
+	p Params
+}
+
+// NewEngine constructs an Engine from resolved parameters.
+func NewEngine(p Params) *Engine { return &Engine{p: p} }
+
+// Params exposes the engine's parameters (read-only use).
+func (e *Engine) Params() Params { return e.p }
+
+// sigmaForEntry resolves the ATM pricing volatility from recent closes.
+func (e *Engine) sigmaForEntry(closes []float64) float64 {
+	var sigma float64
+	if e.p.UseDynamicHV {
+		hv := HistoricalVol(closes, e.p.HVWindow)
+		sigma = hv*e.p.IVMult + e.p.IVAdd
+	} else {
+		sigma = e.p.FixedIV
+	}
+	return ClampSigma(sigma)
+}
+
+// strikes selects the long (ATM) and short (OTM) strikes for a given spot.
+func (e *Engine) strikes(spot float64) (k1, k2 int) {
+	k1 = RoundToStep(spot, e.p.StrikeStep)
+	k2 = RoundToStep(spot*(1+e.p.StrikeDistPct/100.0), e.p.StrikeStep)
+	if k2 < k1+e.p.StrikeStep {
+		k2 = k1 + e.p.StrikeStep
+	}
+	return k1, k2
+}
+
+// dte resolves the effective days-to-expiry for an entry date.
+func (e *Engine) dte(entry time.Time) int {
+	if e.p.UseExpiryCal {
+		return PickExpiryDTE(entry, e.p.DTETarget, e.p.ExpiryWeekday, 2, 10)
+	}
+	return e.p.DTETarget
+}
+
+// slippage returns the per-leg slippage in index points (0 when costs are off).
+func (e *Engine) slippage() float64 {
+	if e.p.Costs.Enable {
+		return e.p.Costs.SlippagePts
+	}
+	return 0.0
+}
+
+// ComputeEntry builds the trade plan at the entry window. `closes` is the
+// recent daily close series (most recent last), `spot` the current entry price,
+// `equity` the available capital and `aboveEMA` the trend-filter state. It
+// mirrors the per-bar entry logic of simulator.run_backtest.
+func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA bool, recentReturns []float64, entryDate time.Time) EntryPlan {
+	plan := EntryPlan{EntrySpot: spot}
+
+	if e.p.UseEMAFilter && !aboveEMA {
+		plan.Reason = "ema_filter: spot below EMA"
+		return plan
+	}
+
+	sigmaATM := e.sigmaForEntry(closes)
+	plan.SigmaATM = sigmaATM
+
+	k1, k2 := e.strikes(spot)
+	plan.K1, plan.K2 = k1, k2
+
+	dte := e.dte(entryDate)
+	plan.DTE = dte
+	plan.Expiry = ExpiryDate(entryDate, dte)
+	tIn := float64(dte) / 365.0
+
+	slip := e.slippage()
+	c1, c2 := SpreadLegs(spot, float64(k1), float64(k2), tIn,
+		e.p.RiskFreeRate, e.p.DivYield, sigmaATM, e.p.SkewPts)
+	// Buy the long leg worse (pay slip), sell the short leg worse (receive less).
+	c1Exec := c1 + slip
+	c2Exec := math.Max(0.0, c2-slip)
+	entryDebit := c1Exec - c2Exec
+	plan.C1Exec, plan.C2Exec, plan.EntryDebit = c1Exec, c2Exec, entryDebit
+
+	if entryDebit <= 0 {
+		plan.Reason = "non-positive entry debit"
+		return plan
+	}
+
+	debitPerLot := entryDebit * float64(e.p.LotSize)
+	plan.DebitPerLot = debitPerLot
+
+	affordable := AffordableLots(equity, debitPerLot)
+	if affordable < 1 {
+		plan.Reason = "affordability: equity cannot fund one lot"
+		return plan
+	}
+
+	desired := e.p.Lots
+	if e.p.UseAGC && len(recentReturns) >= e.p.AGCWindow {
+		window := recentReturns
+		if len(window) > e.p.AGCWindow {
+			window = window[len(window)-e.p.AGCWindow:]
+		}
+		kf := KellyFraction(window, e.p.KellyMult)
+		plan.KellyF = kf
+		if kf > 0 {
+			desired = int(kf * equity / debitPerLot)
+		} else {
+			desired = 1
+		}
+	}
+	nLots := SizeLots(desired, e.p.MaxLots, affordable)
+	plan.Lots = nLots
+	plan.MarginUsed = debitPerLot * float64(nLots)
+
+	plan.Greeks = e.GreeksAt(spot, float64(k1), float64(k2), tIn, sigmaATM)
+	plan.ShouldEnter = true
+	return plan
+}
+
+// GreeksAt returns the model (computed) spread Greeks at a given spot, strikes,
+// time-to-expiry and ATM volatility, using the per-leg skew.
+func (e *Engine) GreeksAt(spot, k1, k2, t, sigmaATM float64) SpreadGreeks {
+	long := CallGreeks(spot, k1, t, e.p.RiskFreeRate, e.p.DivYield, LegSigma(sigmaATM, spot, k1, e.p.SkewPts))
+	short := CallGreeks(spot, k2, t, e.p.RiskFreeRate, e.p.DivYield, LegSigma(sigmaATM, spot, k2, e.p.SkewPts))
+	return SpreadGreeks{Long: long, Short: short, Net: netGreeks(long, short)}
+}
+
+// ComputeExit values the spread at the exit window for the paper broker and for
+// the model-vs-live comparison. `elapsedDays` is the fractional day count held
+// (see OvernightGapDays). Mirrors the exit valuation in simulator.run_backtest.
+func (e *Engine) ComputeExit(plan EntryPlan, exitSpot, elapsedDays float64) ExitResult {
+	tOut := math.Max(1e-4, (float64(plan.DTE)-elapsedDays)/365.0)
+	slip := e.slippage()
+
+	c1, c2 := SpreadLegs(exitSpot, float64(plan.K1), float64(plan.K2), tOut,
+		e.p.RiskFreeRate, e.p.DivYield, plan.SigmaATM, e.p.SkewPts)
+	// Sell the long leg worse, buy back the short leg worse.
+	c1Exec := math.Max(0.0, c1-slip)
+	c2Exec := c2 + slip
+	exitValue := c1Exec - c2Exec
+
+	costs := TradeCashCosts(plan.C1Exec, plan.C2Exec, c1Exec, c2Exec,
+		e.p.LotSize, plan.Lots, e.p.Costs)
+	gross := (exitValue - plan.EntryDebit) * float64(e.p.LotSize) * float64(plan.Lots)
+	net := gross - costs
+
+	retRisk := 0.0
+	if plan.DebitPerLot > 0 {
+		retRisk = (net / float64(plan.Lots)) / plan.DebitPerLot
+	}
+
+	return ExitResult{
+		ExitSpot:   exitSpot,
+		C1Exec:     c1Exec,
+		C2Exec:     c2Exec,
+		ExitValue:  exitValue,
+		GrossPnL:   gross,
+		Costs:      costs,
+		NetPnL:     net,
+		ReturnRisk: retRisk,
+		Greeks:     e.GreeksAt(exitSpot, float64(plan.K1), float64(plan.K2), tOut, plan.SigmaATM),
+	}
+}
+
+// LiveGreeks derives spread Greeks from observed live leg premiums by backing
+// out each leg's implied volatility. Used to store the live option snapshot
+// after a real execution. Falls back to the model sigma when a premium is
+// outside the no-arbitrage band.
+func (e *Engine) LiveGreeks(spot, k1, k2, t, longPrem, shortPrem, fallbackSigma float64) SpreadGreeks {
+	longIV, ok := ImpliedVol(longPrem, spot, k1, t, e.p.RiskFreeRate, e.p.DivYield)
+	if !ok {
+		longIV = LegSigma(fallbackSigma, spot, k1, e.p.SkewPts)
+	}
+	shortIV, ok := ImpliedVol(shortPrem, spot, k2, t, e.p.RiskFreeRate, e.p.DivYield)
+	if !ok {
+		shortIV = LegSigma(fallbackSigma, spot, k2, e.p.SkewPts)
+	}
+	long := CallGreeks(spot, k1, t, e.p.RiskFreeRate, e.p.DivYield, longIV)
+	short := CallGreeks(spot, k2, t, e.p.RiskFreeRate, e.p.DivYield, shortIV)
+	// Override prices with the observed live premiums.
+	long.Price, short.Price = longPrem, shortPrem
+	return SpreadGreeks{Long: long, Short: short, Net: netGreeks(long, short)}
+}
+
+// istZone is the fixed +05:30 exchange timezone used for calendar-date maths so
+// the day count is independent of how timestamps were stored (UTC).
+var istZone = time.FixedZone("IST", 5*3600+30*60)
+
+// FractionalElapsed returns the fractional day count for an overnight hold,
+// charging OvernightGapDays of intraday decay. It counts CALENDAR days between
+// the entry and exit dates (so a Fri->Mon weekend hold is 3 days, matching
+// simulator.run_backtest's (exit_date - entry_date).days), then subtracts the
+// 6h15m intraday gap: 1 day -> 0.740, 3 days -> 2.740.
+func FractionalElapsed(entry, exit time.Time) float64 {
+	e := entry.In(istZone)
+	x := exit.In(istZone)
+	ed := time.Date(e.Year(), e.Month(), e.Day(), 0, 0, 0, 0, istZone)
+	xd := time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, istZone)
+	calDays := int(xd.Sub(ed).Hours()/24.0 + 0.5)
+	if calDays < 1 {
+		calDays = 1
+	}
+	elapsed := float64(calDays) - OvernightGapDays
+	if elapsed < 0.05 {
+		elapsed = 0.05
+	}
+	return elapsed
+}

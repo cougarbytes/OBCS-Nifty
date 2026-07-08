@@ -1,0 +1,78 @@
+rules:
+  # ── OWASP A03: Injection ────────────────────────────────────────────────────
+  - id: obcs-go-sql-string-format
+    languages: [go]
+    severity: ERROR
+    message: >
+      SQL built with fmt.Sprintf/string concatenation reaches a query call. Use
+      pgx parameterized queries ($1, $2 ...) instead to prevent SQL injection.
+    patterns:
+      - pattern-either:
+          - pattern: $POOL.Query($CTX, fmt.Sprintf(...), ...)
+          - pattern: $POOL.Exec($CTX, fmt.Sprintf(...), ...)
+          - pattern: $POOL.QueryRow($CTX, fmt.Sprintf(...), ...)
+          - pattern: $POOL.Query($CTX, $A + $B, ...)
+          - pattern: $POOL.Exec($CTX, $A + $B, ...)
+
+  # ── OWASP A07: Identification & Authentication Failures ─────────────────────
+  - id: obcs-go-jwt-parse-without-valid-methods
+    languages: [go]
+    severity: ERROR
+    message: >
+      JWT parsed without restricting signing methods. Pass
+      jwt.WithValidMethods([]string{"HS256"}) to prevent algorithm-confusion
+      (alg=none / RS-vs-HS) attacks.
+    patterns:
+      - pattern: jwt.ParseWithClaims(...)
+      - pattern-not: jwt.ParseWithClaims(..., jwt.WithValidMethods(...), ...)
+      - pattern-not-inside: |
+          jwt.ParseWithClaims(..., $K, ...)
+
+  # ── OWASP A02: Cryptographic / secret handling ──────────────────────────────
+  - id: obcs-go-hardcoded-secret
+    languages: [go]
+    severity: WARNING
+    message: >
+      Possible hard-coded credential. Load secrets from the environment; never
+      commit them (see internal/config).
+    patterns:
+      - pattern-either:
+          - pattern: $X := "..."
+      - metavariable-regex:
+          metavariable: $X
+          regex: (?i).*(password|secret|apikey|api_key|token|mpin).*
+      - pattern-not: $X := ""
+    paths:
+      exclude:
+        - "*_test.go"
+        - "**/internal/config/*"
+
+  # ── OWASP A05: Security Misconfiguration ─────────────────────────────────────
+  - id: obcs-go-insecure-tls
+    languages: [go]
+    severity: ERROR
+    message: "InsecureSkipVerify:true disables TLS verification (MITM risk)."
+    patterns:
+      - pattern: "InsecureSkipVerify: true"
+
+  - id: obcs-go-cors-wildcard
+    languages: [go]
+    severity: WARNING
+    message: >
+      Wildcard CORS origin. Restrict Access-Control-Allow-Origin to the
+      configured allow-list.
+    patterns:
+      - pattern: $H.Set("Access-Control-Allow-Origin", "*")
+
+  # ── OWASP A03: Cross-Site Scripting (frontend) ──────────────────────────────
+  - id: obcs-vue-v-html
+    languages: [generic]
+    severity: WARNING
+    message: >
+      v-html renders raw HTML and can introduce XSS. Prefer text interpolation
+      or sanitize the input.
+    patterns:
+      - pattern: v-html=$X
+    paths:
+      include:
+        - "*.vue"

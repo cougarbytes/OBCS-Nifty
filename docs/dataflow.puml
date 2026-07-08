@@ -1,0 +1,73 @@
+@startuml OBCS-Nifty-Dataflow
+' Data-flow of the OBCS-Nifty trading application.
+' Render: plantuml docs/dataflow.puml  (or paste into plantuml.com).
+
+title OBCS-Nifty — Data Flow
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName Inter
+skinparam ArrowColor #26a69a
+skinparam componentBorderColor #30363d
+
+actor "Operator\n(single seeded user)" as user
+
+package "Browser (Nuxt SPA)" {
+  [Login Page] as login
+  [Dashboard] as dash
+}
+
+cloud "Supabase (self-hosted)" {
+  [Kong Gateway :8000] as kong
+  [GoTrue (Auth)] as auth
+  [PostgREST] as rest
+  [Realtime] as rt
+  database "Postgres\n(trades, strategy_state,\ntrade_option_data,\nholidays, v_daily_pnl)" as pg
+}
+
+package "Backend (Go/Gin :8080)" {
+  [Auth Middleware\n(verify Supabase JWT)] as mw
+  [API Handlers] as api
+  [Strategy Engine\n(BS + Greeks + costs)] as engine
+  [Runner goroutine\n(entry/exit scheduler)] as runner
+  [NSE Holiday Scraper] as nse
+  [AngelOne Client\n(paper | live broker)] as ao
+}
+
+cloud "External" {
+  [AngelOne SmartAPI] as smart
+  [NSE holiday endpoint] as nseweb
+}
+
+' Auth flow
+user --> login : credentials (once, generated)
+login --> kong : POST /auth/v1/token (email+password)
+kong --> auth : verify
+auth --> login : access_token (JWT)
+
+' Read path (UI)
+dash --> api : GET /api/* (Bearer JWT)
+api --> mw : validate JWT (HS256, aud=authenticated)
+mw --> api : ok
+api --> pg : parameterized SQL (single writer/reader)
+dash <-- rt : Realtime: trades / strategy_state changes
+rt --> pg : logical replication (supabase_realtime pub)
+dash --> rest : optional read-only (RLS: authenticated SELECT)
+rest --> pg
+
+' Control path
+dash --> api : POST /api/strategy/{start,stop,enter,exit}
+api --> runner : Start/Stop/Enter/Exit
+
+' Strategy loop
+runner --> engine : ComputeEntry / ComputeExit
+runner --> ao : Buy/Sell legs
+ao --> smart : place order (LIVE mode only)
+runner --> pg : INSERT trade + LIVE option snapshot\nUPDATE strategy_state
+
+' Initialization
+nse --> nseweb : scrape holidays (once/year)
+nse --> pg : UPSERT holidays
+api --> auth : seed single app user (once, service_role)
+
+@enduml

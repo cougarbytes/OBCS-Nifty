@@ -1,0 +1,248 @@
+openapi: 3.0.3
+info:
+  title: OBCS-Nifty API
+  version: 1.0.0
+  description: >
+    Backend API for the Overnight Bull Call Spread (OBCS) trading application on
+    the NIFTY index. The Go/Gin backend is the single writer to the Supabase
+    Postgres database; the Nuxt frontend reads live data via Supabase Realtime
+    and calls these endpoints for state and control. All /api routes require a
+    Supabase-issued bearer access token.
+servers:
+  - url: http://localhost:8080
+    description: Local / Docker Compose
+components:
+  securitySchemes:
+    supabaseAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase Auth access token (HS256, aud=authenticated).
+  schemas:
+    StrategyState:
+      type: object
+      properties:
+        status: { type: string, enum: [running, stopped] }
+        trading_mode: { type: string, enum: [paper, live] }
+        started_at: { type: string, format: date-time, nullable: true }
+        stopped_at: { type: string, format: date-time, nullable: true }
+        accumulated_runtime_seconds: { type: integer, format: int64 }
+        runtime_seconds: { type: integer, format: int64, description: Derived total runtime incl. current session }
+        equity: { type: number }
+        last_message: { type: string }
+        updated_at: { type: string, format: date-time }
+    Greeks:
+      type: object
+      properties:
+        price: { type: number }
+        delta: { type: number }
+        gamma: { type: number }
+        theta: { type: number, description: per calendar day }
+        vega: { type: number, description: per +1 vol point }
+        iv: { type: number, description: annualized fraction }
+    SpreadGreeks:
+      type: object
+      properties:
+        long: { $ref: '#/components/schemas/Greeks' }
+        short: { $ref: '#/components/schemas/Greeks' }
+        net: { $ref: '#/components/schemas/Greeks' }
+    OptionData:
+      type: object
+      properties:
+        id: { type: string }
+        trade_id: { type: string }
+        leg: { type: string, enum: [long, short, net] }
+        phase: { type: string, enum: [entry, exit] }
+        data_type: { type: string, enum: [live] }
+        price: { type: number }
+        delta: { type: number }
+        gamma: { type: number }
+        theta: { type: number }
+        vega: { type: number }
+        iv: { type: number }
+        captured_at: { type: string, format: date-time }
+    Trade:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [open, closed, error] }
+        trading_mode: { type: string, enum: [paper, live] }
+        underlying: { type: string }
+        entry_time: { type: string, format: date-time }
+        exit_time: { type: string, format: date-time, nullable: true }
+        contract_expiry: { type: string, format: date-time }
+        k1: { type: integer }
+        k2: { type: integer }
+        lots: { type: integer }
+        lot_size: { type: integer }
+        entry_spot: { type: number }
+        exit_spot: { type: number, nullable: true }
+        sigma_atm: { type: number }
+        entry_debit: { type: number }
+        exit_value: { type: number, nullable: true }
+        margin_used: { type: number }
+        gross_pnl: { type: number, nullable: true }
+        costs: { type: number, nullable: true }
+        net_pnl: { type: number, nullable: true }
+        option_data:
+          type: array
+          items: { $ref: '#/components/schemas/OptionData' }
+    DailyPnL:
+      type: object
+      properties:
+        day: { type: string, example: '2026-07-08' }
+        net_pnl: { type: number }
+        trades: { type: integer }
+        wins: { type: integer }
+    Holiday:
+      type: object
+      properties:
+        date: { type: string, example: '2026-01-26' }
+        description: { type: string }
+        year: { type: integer }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+security:
+  - supabaseAuth: []
+paths:
+  /health:
+    get:
+      summary: Liveness probe (public)
+      security: []
+      responses:
+        '200':
+          description: OK
+  /api/strategy/state:
+    get:
+      summary: Get runner state and total runtime
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StrategyState' }
+        '401': { description: Unauthorized }
+  /api/strategy/preview:
+    get:
+      summary: Compute the current entry plan with computed Greeks (no order placed)
+      responses:
+        '200': { description: OK }
+  /api/strategy/start:
+    post:
+      summary: Start the strategy runner goroutine
+      responses:
+        '200': { description: Running }
+        '409':
+          description: Conflict (already running or halted)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/strategy/stop:
+    post:
+      summary: Stop the strategy runner
+      responses:
+        '200': { description: Stopped }
+  /api/strategy/enter:
+    post:
+      summary: Force an entry now (paper mode only)
+      responses:
+        '200': { description: Entered }
+        '403': { description: Forbidden in live mode }
+  /api/strategy/exit:
+    post:
+      summary: Force an exit of the open trade now (paper mode only)
+      responses:
+        '200': { description: Closed }
+        '403': { description: Forbidden in live mode }
+        '409': { description: No open trade }
+  /api/trades:
+    get:
+      summary: List recent trades with live option data
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100, maximum: 500 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items: { $ref: '#/components/schemas/Trade' }
+  /api/trades/{id}/options:
+    get:
+      summary: Get persisted LIVE option snapshots for a trade
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /api/trades/{id}/computed:
+    get:
+      summary: Compute fresh model Greeks for comparison (not persisted)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trade_id: { type: string }
+                  spot: { type: number }
+                  data_type: { type: string, enum: [computed] }
+                  greeks: { $ref: '#/components/schemas/SpreadGreeks' }
+        '404': { description: Trade not found }
+  /api/pnl/daily:
+    get:
+      summary: Realized daily P&L for a date range (defaults to current year)
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, example: '2026-01-01' }
+        - in: query
+          name: to
+          schema: { type: string, example: '2026-12-31' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  daily:
+                    type: array
+                    items: { $ref: '#/components/schemas/DailyPnL' }
+  /api/holidays:
+    get:
+      summary: NSE trading holidays for a year
+      parameters:
+        - in: query
+          name: year
+          schema: { type: integer, example: 2026 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  year: { type: integer }
+                  holidays:
+                    type: array
+                    items: { $ref: '#/components/schemas/Holiday' }

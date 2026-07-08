@@ -1,0 +1,52 @@
+@startuml OBCS-Nifty-ThreatModel
+' STRIDE-oriented threat model with trust boundaries.
+' Render: plantuml docs/threat-model.puml
+
+title OBCS-Nifty — Threat Model (STRIDE)
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName Inter
+
+legend right
+  Trust boundaries are dashed. Mitigations tagged [Mn].
+  M1 Supabase JWT verification (HS256, aud, exp) on every /api route
+  M2 RLS: authenticated=SELECT only; backend (service_role) is sole writer
+  M3 Parameterized SQL (pgx) — no string concatenation
+  M4 Secrets only via env; never logged, never committed (.env gitignored)
+  M5 Paper mode default; live orders gated by TRADING_MODE=live + creds
+  M6 CORS allow-list + strict security headers + per-IP rate limit
+  M7 Non-root containers; least-privilege DB roles
+  M8 TOTP + MPIN for AngelOne; creds in-memory only
+end legend
+
+actor Attacker as atk
+
+package "== Boundary: Public Internet ==" as b1 #line.dashed {
+  [Browser SPA] as spa
+}
+
+package "== Boundary: App Network ==" as b2 #line.dashed {
+  [Kong / GoTrue / PostgREST / Realtime] as sb
+  [Go Backend] as be
+  database Postgres as pg
+}
+
+package "== Boundary: Broker ==" as b3 #line.dashed {
+  [AngelOne SmartAPI] as ao
+}
+
+atk ..> spa : Spoofing (S) — steal session\n=> M1, short JWT exp
+atk ..> be : Tampering (T) — forge requests\n=> M1, M3, M6
+atk ..> be : Elevation (E) — write via API\n=> M2 (UI read-only), M1
+atk ..> pg : Info disclosure (I) — read all rows\n=> M2 RLS, M7 least priv
+atk ..> be : DoS (D) — flood control endpoints\n=> M6 rate limit
+atk ..> be : Repudiation (R) — deny actions\n=> structured audit logs (no secrets)
+atk ..> ao : Info disclosure — steal broker creds\n=> M4, M8, M5
+
+spa --> sb : login (JWT)
+spa --> be : Bearer JWT [M1]
+be --> pg : SQL [M3], service_role [M2]
+be --> ao : orders [M5, M8]
+
+@enduml
