@@ -1,13 +1,21 @@
 #!/bin/bash
-# Idempotent Supabase alignment run once on first DB init:
-#   * ensure the internal Supabase roles share POSTGRES_PASSWORD so GoTrue,
-#     PostgREST and Realtime can authenticate;
-#   * set the JWT GUCs PostgREST/Realtime read;
-#   * create the supabase_realtime publication the UI subscribes to.
-# Guards make each step safe if the base image already performed it.
 set -euo pipefail
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+    -- 1. Create missing schemas/roles just in case the Supabase migrations aborted
+    CREATE SCHEMA IF NOT EXISTS _realtime;
+    
+    DO \$\$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+            CREATE ROLE supabase_admin WITH SUPERUSER LOGIN PASSWORD '${POSTGRES_PASSWORD}';
+        END IF;
+    END
+    \$\$;
+
+    ALTER SCHEMA _realtime OWNER TO supabase_admin;
+
+    -- 2. Align passwords for all Supabase internal roles so the stack can connect
     DO \$\$
     DECLARE
         r text;
@@ -23,16 +31,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     END
     \$\$;
 
+    -- 3. Set required JWT configuration
     ALTER DATABASE "${POSTGRES_DB}" SET "app.settings.jwt_secret" TO '${JWT_SECRET}';
     ALTER DATABASE "${POSTGRES_DB}" SET "app.settings.jwt_exp" TO 3600;
-
-    DO \$\$
-    BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
-            CREATE PUBLICATION supabase_realtime;
-        END IF;
-    END
-    \$\$;
 EOSQL
 
 echo "OBCS: supabase roles/jwt/realtime alignment complete."
