@@ -1,0 +1,236 @@
+# OBCS-Nifty — PRODUCTION stack (single public entrypoint via Caddy).
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Exposure model — Caddy is the ONLY service with published host ports:
+#
+#   PUBLIC (host ports)         caddy            :443 (+ :80 redirect, optional)
+#   REVERSE-PROXIED via $DOMAIN frontend  /      (Nuxt SPA)
+#                               backend   /api/* (Go API)
+#                               kong      /auth,/rest,/realtime,/storage
+#   INTERNAL ONLY (no ports)    db, auth, rest, realtime, meta, studio
+#
+# auth/rest/realtime are reached only THROUGH kong; db/meta/studio never leave
+# the Docker network. TLS is issued by Let's Encrypt over the Cloudflare DNS-01
+# challenge (no inbound :80 needed, works behind a Cloudflare-proxied record).
+#
+# Required env (in .env): DOMAIN, ACME_EMAIL, CLOUDFLARE_API_TOKEN, and the
+# secrets — POSTGRES_PASSWORD, JWT_SECRET, ANON_KEY, SERVICE_ROLE_KEY,
+# DATABASE_URL. Public URLs are derived from DOMAIN, so you do not set them
+# per-service. Behind Cloudflare: SSL/TLS = Full (strict), WebSockets = on.
+
+name: obcs-nifty-prod
+
+services:
+  caddy:
+    build:
+      context: ./deploy/caddy
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+      - kong
+    ports:
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+      - "80:80"          # HTTP->HTTPS redirect; safe to remove behind Cloudflare
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  db:
+    image: supabase/postgres:15.8.1.060
+    restart: unless-stopped
+    # No host port — the database is never reachable from outside the network.
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./supabase/volumes/db/99-obcs-init.sh:/docker-entrypoint-initdb.d/z-obcs-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth:
+    image: supabase/gotrue:v2.158.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: https://${DOMAIN}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      GOTRUE_SITE_URL: https://${DOMAIN}
+      GOTRUE_URI_ALLOW_LIST: https://${DOMAIN}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-true}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${GOTRUE_EXTERNAL_EMAIL_ENABLED:-true}
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM:-true}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rest:
+    image: postgrest/postgrest:v12.2.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+
+  realtime:
+    image: supabase/realtime:v2.30.34
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${REALTIME_SECRET_KEY_BASE:-UpNVntn3cDxHJpq99YMc1T1AQgQpc8kfYTuRgBiYa15BLrx8etQoXz3gZv1/u2oq}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+
+  meta:
+    image: supabase/postgres-meta:v0.83.2
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: ${POSTGRES_DB:-postgres}
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  kong:
+    image: kong:2.8.1
+    restart: unless-stopped
+    depends_on:
+      - auth
+      - rest
+      - realtime
+    # No host port — Caddy reaches it at kong:8000 on the internal network.
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors
+    volumes:
+      - ./supabase/volumes/kong/kong.yml:/home/kong/kong.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "kong health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Admin UI. Internal-only and profile-gated: NOT started by default and NOT
+  # routed publicly. Reach it over an SSH tunnel, e.g.
+  #   docker compose -f docker-compose.prod.yml --profile studio up -d studio
+  #   ssh -L 3001:127.0.0.1:3001 <host>   # then map a temporary port if needed
+  studio:
+    image: supabase/studio:20240729-ce42139
+    restart: unless-stopped
+    profiles: ["studio"]
+    depends_on:
+      - meta
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: https://${DOMAIN}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+
+  backend:
+    build:
+      context: ./OBCS-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+    # No host port — Caddy proxies https://$DOMAIN/api/* to backend:8080.
+    environment:
+      PORT: 8080
+      ALLOWED_ORIGINS: https://${DOMAIN}
+      DATABASE_URL: ${DATABASE_URL}
+      SUPABASE_URL: http://kong:8000   # internal (server-side) — not the public URL
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_JWT_SECRET: ${JWT_SECRET}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      AO_API_KEY: ${AO_API_KEY:-}
+      AO_CLIENT_CODE: ${AO_CLIENT_CODE:-}
+      AO_MPIN: ${AO_MPIN:-}
+      AO_TOTP_SECRET: ${AO_TOTP_SECRET:-}
+      AO_BASE_URL: ${AO_BASE_URL:-https://apiconnect.angelbroking.com}
+      STRAT_UNDERLYING: ${STRAT_UNDERLYING:-NIFTY}
+      STRAT_LOT_SIZE: ${STRAT_LOT_SIZE:-65}
+      STRAT_LOTS: ${STRAT_LOTS:-2}
+      STRAT_STRIKE_STEP: ${STRAT_STRIKE_STEP:-50}
+      STRAT_STRIKE_DIST_PCT: ${STRAT_STRIKE_DIST_PCT:-1.0}
+      STRAT_DTE_TARGET: ${STRAT_DTE_TARGET:-14}
+      STRAT_INITIAL_CAPITAL: ${STRAT_INITIAL_CAPITAL:-200000}
+      STRAT_USE_EMA: ${STRAT_USE_EMA:-false}
+      STRAT_USE_AGC: ${STRAT_USE_AGC:-false}
+      STRAT_ENABLE_COSTS: ${STRAT_ENABLE_COSTS:-true}
+
+  frontend:
+    build:
+      context: ./OBCS-frontend
+      args:
+        # Public values baked into the SPA at build time — all the $DOMAIN origin.
+        NUXT_PUBLIC_API_BASE: https://${DOMAIN}
+        SUPABASE_URL: https://${DOMAIN}
+        SUPABASE_KEY: ${ANON_KEY}
+        NUXT_SUPABASE_COOKIE_SECURE: "true"   # HTTPS in prod → Secure cookies
+    restart: unless-stopped
+    depends_on:
+      - backend
+    # No host port — Caddy proxies https://$DOMAIN/ to frontend:3000.
+    environment:
+      NUXT_PUBLIC_API_BASE: https://${DOMAIN}
+      SUPABASE_URL: https://${DOMAIN}
+      SUPABASE_KEY: ${ANON_KEY}
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,38 @@
+# Single public entrypoint for the OBCS-Nifty stack.
+#
+# TLS is obtained from Let's Encrypt via the Cloudflare DNS-01 challenge
+# (CLOUDFLARE_API_TOKEN), so no inbound :80 is required and it works behind a
+# Cloudflare-proxied record. Everything is served same-origin under $DOMAIN and
+# path-routed to the internal services — nothing else is published to the host.
+#
+# Env (from the compose file): DOMAIN, ACME_EMAIL, CLOUDFLARE_API_TOKEN.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Certificate via Cloudflare DNS-01. The token needs Zone:DNS:Edit on the zone.
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	# Supabase API gateway (Kong) — GoTrue /auth, PostgREST /rest,
+	# Realtime /realtime (WebSocket upgrade is handled automatically), Storage.
+	@supabase path /auth/* /rest/* /realtime/* /storage/*
+	handle @supabase {
+		reverse_proxy kong:8000
+	}
+
+	# Go backend API + strategy runner.
+	handle /api/* {
+		reverse_proxy backend:8080
+	}
+
+	# Nuxt SPA (everything else).
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

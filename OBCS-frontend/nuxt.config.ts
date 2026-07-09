@@ -26,15 +26,15 @@ export default defineNuxtConfig({
     url: process.env.SUPABASE_URL || 'http://localhost:8000',
     key: process.env.SUPABASE_KEY || '',
     redirect: false, // <--- Disable the aggressive automatic global redirect guard
-    // The session lives in an `sb-*-auth-token` cookie. By default the module
-    // marks it `Secure`, which browsers silently drop over plain HTTP on a public
-    // host (localhost is exempt) — the session never persists, so login bounces
-    // straight back to /login. `secure: false` lets the cookie survive over HTTP.
-    // INSECURE: the session token then travels in cleartext — trusted networks
-    // only. Restore `secure: true` (the module default) once served over HTTPS.
+    // The session lives in an `sb-*-auth-token` cookie. Over HTTPS it MUST be
+    // `Secure` (the default). Browsers drop `Secure` cookies over plain HTTP on a
+    // public host (localhost is exempt), which causes a login → /login redirect
+    // loop — so only for a plain-HTTP deployment on a trusted network, build with
+    // NUXT_SUPABASE_COOKIE_SECURE=false. This is baked at build time (SPA); see
+    // OBCS-frontend/README.md → "Secure cookies in production".
     cookieOptions: {
       sameSite: 'lax',
-      secure: false,
+      secure: process.env.NUXT_SUPABASE_COOKIE_SECURE !== 'false',
     },
   },
 })

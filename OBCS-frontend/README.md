@@ -78,9 +78,57 @@ color-blindness and grayscale; a screen-reader data table backs the SVG.
 
 | Env var | Default | Notes |
 | --- | --- | --- |
-| `NUXT_PUBLIC_API_BASE` | `http://localhost:8080` | Go backend base URL |
-| `SUPABASE_URL` | `http://localhost:8000` | Public Supabase gateway |
+| `NUXT_PUBLIC_API_BASE` | `http://localhost:8080` | Go backend base URL (baked at build) |
+| `SUPABASE_URL` | `http://localhost:8000` | Public Supabase gateway (baked at build) |
 | `SUPABASE_KEY` | — | Supabase anon key (**required** — the app 500s without a valid key) |
+| `NUXT_SUPABASE_COOKIE_SECURE` | `true` | Session-cookie `Secure` flag (baked at build). See below. |
+
+> These are compiled into the SPA at **build time** (`ssr: false`), so changing
+> any of them requires a **rebuild** of the frontend image — a container restart
+> alone won't pick them up.
+
+## Secure cookies in production
+
+The Supabase session lives in an `sb-*-auth-token` cookie written by the browser
+client. `@nuxtjs/supabase` marks it `Secure` by default. Browsers **only keep
+`Secure` cookies on a secure context** — `http://localhost` counts, but a public
+IP/host over plain **HTTP does not**, so the cookie is silently dropped and login
+bounces straight back to `/login`.
+
+The flag is driven by `NUXT_SUPABASE_COOKIE_SECURE` in `nuxt.config.ts`:
+
+```ts
+// nuxt.config.ts → supabase.cookieOptions
+cookieOptions: {
+  sameSite: 'lax',
+  secure: process.env.NUXT_SUPABASE_COOKIE_SECURE !== 'false', // secure by default
+},
+```
+
+| Deployment | Setting | Why |
+| --- | --- | --- |
+| **Production over HTTPS** (recommended — e.g. behind Caddy/Cloudflare) | leave unset / `true` | Session cookie is `Secure`; the correct, safe default. |
+| Local dev on `localhost` | leave unset / `true` | `localhost` is a secure context, so `Secure` works even over HTTP. |
+| Plain **HTTP** on a public host (trusted network only) | `NUXT_SUPABASE_COOKIE_SECURE=false` | Lets the cookie persist over HTTP. **Insecure** — the token travels in cleartext; use TLS instead wherever possible. |
+
+Because it is baked at build time, set it as a Docker **build arg**:
+
+```bash
+docker build --build-arg NUXT_SUPABASE_COOKIE_SECURE=false -t obcs-frontend ./OBCS-frontend
+```
+
+The production stack (`docker-compose.prod.yml`) terminates TLS at Caddy and
+serves everything over HTTPS on one domain, so it forces the secure default —
+you don't need to set anything.
+
+## Production deployment
+
+`docker-compose.prod.yml` (repo root) runs the whole stack behind a single Caddy
+reverse proxy that obtains Let's Encrypt certs via the Cloudflare DNS-01
+challenge. Caddy is the only service with published host ports; the SPA, the Go
+API, and the Supabase gateway are all served same-origin under one `$DOMAIN`
+(`/`, `/api/*`, `/auth|/rest|/realtime|/storage`). See that file's header and
+`.env.example` (Production section) for the required env.
 
 ## Develop
 

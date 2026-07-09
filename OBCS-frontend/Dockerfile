@@ -7,9 +7,13 @@ WORKDIR /app
 ARG NUXT_PUBLIC_API_BASE=http://localhost:8080
 ARG SUPABASE_URL=http://localhost:8000
 ARG SUPABASE_KEY=
+# Session-cookie Secure flag, baked into the SPA. Defaults to secure (HTTPS).
+# Set to "false" only for a plain-HTTP deployment on a trusted network.
+ARG NUXT_SUPABASE_COOKIE_SECURE=true
 ENV NUXT_PUBLIC_API_BASE=$NUXT_PUBLIC_API_BASE \
     SUPABASE_URL=$SUPABASE_URL \
-    SUPABASE_KEY=$SUPABASE_KEY
+    SUPABASE_KEY=$SUPABASE_KEY \
+    NUXT_SUPABASE_COOKIE_SECURE=$NUXT_SUPABASE_COOKIE_SECURE
 
 COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile || bun install
