@@ -40,10 +40,12 @@ export default <Partial<Config>>{
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        elevated: 'hsl(var(--elevated))',
         // Trading semantics (OKX-inspired teal/red) + holiday accent.
         gain: 'hsl(var(--gain))',
         loss: 'hsl(var(--loss))',
         holiday: 'hsl(var(--holiday))',
+        'chart-grid': 'hsl(var(--chart-grid))',
       },
       borderRadius: {
         lg: 'var(--radius)',
