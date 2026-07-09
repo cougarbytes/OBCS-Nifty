@@ -229,7 +229,7 @@ func (s *Server) preview(c *gin.Context) {
 	if s.cfg.Strategy.UseEMAFilter {
 		aboveEMA = spot >= strategy.EMA(closes, s.cfg.Strategy.EMAPeriod)
 	}
-	recent, _ := s.store.RecentReturns(ctx, s.cfg.Strategy.AGCWindow)
+	recent, _ := s.store.RecentReturns(ctx, s.cfg.Strategy.AGCWindow, string(s.cfg.TradingMode))
 	plan := s.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, time.Now().In(config.IST()))
 	c.JSON(http.StatusOK, gin.H{"plan": plan, "data_source": s.md.Source()})
 }

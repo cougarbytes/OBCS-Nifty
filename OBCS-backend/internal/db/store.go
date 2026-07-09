@@ -232,17 +232,25 @@ func (s *Store) GetOpenTrade(ctx context.Context) (*models.Trade, error) {
 }
 
 // RecentReturns returns the last n closed-trade return-on-risk values (oldest
-// first) for Kelly sizing.
-func (s *Store) RecentReturns(ctx context.Context, n int) ([]float64, error) {
+// first) for Kelly sizing, scoped to the given trading mode.
+//
+// The return is normalized by the premium DEBIT (entry_debit * lot_size * lots),
+// not margin_used, so it reproduces the simulator's per-trade `ret_risk`
+// (pnl_lot / debit_rs_per_lot). In live mode margin_used carries the broker's
+// SPAN+exposure hedged margin — a different, larger base — which would inflate
+// the Kelly fraction and break sizing (which is itself debit-based). Filtering
+// by mode also prevents a paper/live mix from blending incompatible bases.
+func (s *Store) RecentReturns(ctx context.Context, n int, mode string) ([]float64, error) {
 	if n <= 0 {
 		n = 30
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT CASE WHEN margin_used > 0 THEN net_pnl / margin_used ELSE 0 END AS r
+		SELECT CASE WHEN entry_debit > 0 AND lot_size > 0 AND lots > 0
+		            THEN net_pnl / (entry_debit * lot_size * lots) ELSE 0 END AS r
 		FROM public.trades
-		WHERE status = 'closed' AND net_pnl IS NOT NULL
+		WHERE status = 'closed' AND net_pnl IS NOT NULL AND trading_mode = $2
 		ORDER BY exit_time DESC
-		LIMIT $1`, n)
+		LIMIT $1`, n, mode)
 	if err != nil {
 		return nil, err
 	}

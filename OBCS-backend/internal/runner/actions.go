@@ -40,7 +40,7 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 		aboveEMA = spot >= ema
 	}
 
-	recent, err := r.store.RecentReturns(ctx, r.cfg.Strategy.AGCWindow)
+	recent, err := r.store.RecentReturns(ctx, r.cfg.Strategy.AGCWindow, string(r.cfg.TradingMode))
 	if err != nil {
 		return err
 	}
