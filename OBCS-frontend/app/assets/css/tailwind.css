@@ -2,16 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn-vue design tokens. Dark is the default (futuristic, OKX-inspired);
-   light mode overrides below. Every component reads these variables so the
-   whole UI respects the active theme. */
+/* shadcn-vue design tokens. Dark is the default (futuristic, OKX-inspired
+   trading-terminal look); light mode overrides below. Every component reads
+   these variables so the whole UI respects the active theme. */
 @layer base {
   :root {
     --background: 0 0% 100%;
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
-    --primary: 173 80% 40%;          /* teal */
+    --elevated: 210 40% 98%;         /* raised surface (stat tiles) */
+    --primary: 173 80% 38%;          /* teal */
     --primary-foreground: 0 0% 100%;
     --secondary: 210 40% 96%;
     --secondary-foreground: 222 47% 11%;
@@ -24,9 +25,10 @@
     --border: 214 32% 91%;
     --input: 214 32% 91%;
     --ring: 173 80% 40%;
-    --gain: 168 76% 42%;             /* #26a69a-ish */
-    --loss: 4 90% 58%;               /* #ef5350-ish */
-    --holiday: 38 92% 50%;           /* amber, theme-aware */
+    --gain: 168 76% 38%;             /* teal-green — bull */
+    --loss: 4 82% 54%;               /* red — bear */
+    --holiday: 38 92% 48%;           /* amber, theme-aware */
+    --chart-grid: 214 30% 90%;       /* recessive gridlines */
     --radius: 0.6rem;
   }
 
@@ -35,6 +37,7 @@
     --foreground: 210 40% 96%;
     --card: 222 40% 8%;
     --card-foreground: 210 40% 96%;
+    --elevated: 220 39% 11%;         /* raised surface (stat tiles) */
     --primary: 173 80% 44%;
     --primary-foreground: 222 47% 5%;
     --secondary: 217 33% 14%;
@@ -48,9 +51,10 @@
     --border: 217 33% 18%;
     --input: 217 33% 18%;
     --ring: 173 80% 44%;
-    --gain: 168 76% 46%;
-    --loss: 4 90% 62%;
+    --gain: 168 74% 46%;
+    --loss: 4 88% 62%;
     --holiday: 45 90% 58%;
+    --chart-grid: 217 33% 16%;
   }
 
   * {
@@ -59,5 +63,29 @@
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+  /* Numeric data reads as a ledger: fixed-width, aligned columns. */
+  .font-mono,
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Recessive, terminal-style scrollbars so dense tables/charts don't shout. */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
