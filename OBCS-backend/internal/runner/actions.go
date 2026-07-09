@@ -21,10 +21,9 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 	if err != nil {
 		return err
 	}
-	equity := st.Equity
-	if equity <= 0 {
-		equity = r.cfg.Strategy.InitialCapital
-	}
+	// Live mode sizes against the broker's real available cash; paper mode uses
+	// the stored equity (falling back to configured initial capital).
+	equity := r.resolveEquity(ctx, st.Equity)
 
 	spot, err := r.md.Spot(ctx)
 	if err != nil {
@@ -55,20 +54,57 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 	}
 
 	qty := plan.Lots * r.cfg.Strategy.LotSize
-	longLeg := broker.Leg{Strike: plan.K1, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C1Exec}
-	shortLeg := broker.Leg{Strike: plan.K2, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C2Exec}
+	// Tag both legs with a shared id so the spread is identifiable as one hedged
+	// basket on the broker (AngelOne has no atomic multi-leg order).
+	tag := fmt.Sprintf("OBCS%d", now.Unix())
+	underlying := r.cfg.Strategy.Underlying
+	longLeg := broker.Leg{Strike: plan.K1, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C1Exec, Tag: tag}
+	shortLeg := broker.Leg{Strike: plan.K2, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C2Exec, Tag: tag}
 
-	longFill, longRef, err := r.brk.Buy(ctx, r.cfg.Strategy.Underlying, longLeg)
+	// Pre-trade margin gate (live): price the whole spread as one hedged basket
+	// and refuse to open if the broker requirement exceeds available cash. This
+	// keeps the recorded margin honest and avoids a partial fill on rejection.
+	brokerMargin := 0.0
+	if mp, ok := r.brk.(broker.MarginProvider); ok {
+		basket := []broker.SpreadLeg{{Leg: longLeg, Side: "BUY"}, {Leg: shortLeg, Side: "SELL"}}
+		if m, err := mp.SpreadMargin(ctx, underlying, basket); err != nil {
+			r.log.Warn("spread margin check failed; proceeding on debit estimate", "err", err)
+		} else {
+			brokerMargin = m
+			if m > equity {
+				msg := fmt.Sprintf("no entry: required margin %.2f exceeds available equity %.2f", m, equity)
+				_ = r.store.UpdateStateMessage(ctx, equity, msg)
+				r.log.Warn("insufficient margin", "required", m, "equity", equity)
+				return nil
+			}
+		}
+	}
+
+	// Buy the long (hedge) leg first so the short leg is never left unhedged. If
+	// the short leg then fails, unwind the long leg rather than carrying a naked
+	// long (and never a naked short).
+	longFill, longRef, err := r.brk.Buy(ctx, underlying, longLeg)
 	if err != nil {
 		return fmt.Errorf("buy long leg: %w", err)
 	}
-	shortFill, shortRef, err := r.brk.Sell(ctx, r.cfg.Strategy.Underlying, shortLeg)
+	shortFill, shortRef, err := r.brk.Sell(ctx, underlying, shortLeg)
 	if err != nil {
-		return fmt.Errorf("sell short leg: %w", err)
+		if _, unwindRef, uErr := r.brk.Sell(ctx, underlying, longLeg); uErr != nil {
+			r.log.Error("short leg failed AND long-leg unwind failed; manual intervention required",
+				"long_ref", longRef, "short_err", err, "unwind_err", uErr)
+		} else {
+			r.log.Warn("short leg failed; unwound long leg", "long_ref", longRef, "unwind_ref", unwindRef, "short_err", err)
+		}
+		return fmt.Errorf("sell short leg (long leg unwound): %w", err)
 	}
 
 	entryDebit := longFill - shortFill
+	// Record the broker's true hedged margin when available; otherwise the
+	// debit is the spread's capital at risk (max loss for a debit spread).
 	marginUsed := entryDebit * float64(r.cfg.Strategy.LotSize) * float64(plan.Lots)
+	if brokerMargin > 0 {
+		marginUsed = brokerMargin
+	}
 
 	kelly := plan.KellyF
 	trade := models.Trade{
@@ -129,15 +165,20 @@ func (r *Runner) Exit(ctx context.Context, trade *models.Trade, force bool) erro
 	// Determine exit leg fills.
 	var exitLong, exitShort float64
 	if r.brk.Mode() == r.cfg.TradingMode && r.cfg.TradingMode == "live" {
-		// Live: reverse the spread (sell long, buy back short).
+		// Live: reverse the spread. Buy back the SHORT leg FIRST so the long
+		// hedge is never removed while the short is still open (which would leave
+		// a naked short call — full SPAN+exposure margin and open-ended risk).
 		qty := trade.Lots * trade.LotSize
-		longLeg := broker.Leg{Strike: trade.K1, Expiry: trade.ContractExpiry, OptionType: "CE", Qty: qty}
-		shortLeg := broker.Leg{Strike: trade.K2, Expiry: trade.ContractExpiry, OptionType: "CE", Qty: qty}
-		if exitLong, _, err = r.brk.Sell(ctx, trade.Underlying, longLeg); err != nil {
-			return fmt.Errorf("sell long leg: %w", err)
-		}
+		tag := fmt.Sprintf("OBCSX%d", time.Now().Unix())
+		longLeg := broker.Leg{Strike: trade.K1, Expiry: trade.ContractExpiry, OptionType: "CE", Qty: qty, Tag: tag}
+		shortLeg := broker.Leg{Strike: trade.K2, Expiry: trade.ContractExpiry, OptionType: "CE", Qty: qty, Tag: tag}
 		if exitShort, _, err = r.brk.Buy(ctx, trade.Underlying, shortLeg); err != nil {
-			return fmt.Errorf("buy short leg: %w", err)
+			return fmt.Errorf("buy back short leg: %w", err)
+		}
+		if exitLong, _, err = r.brk.Sell(ctx, trade.Underlying, longLeg); err != nil {
+			// Short leg already covered; a leftover long call is benign (limited
+			// risk). Surface for reconciliation rather than forcing more orders.
+			return fmt.Errorf("sell long leg (short leg already covered): %w", err)
 		}
 	} else {
 		// Paper: value the legs on the model at the exit spot/time.

@@ -19,6 +19,14 @@ type Leg struct {
 	OptionType string  // "CE"
 	Qty        int     // total contracts = lots * lot_size
 	ModelPrice float64 // strategy model premium (points); paper fill uses this
+	Tag        string  // groups the legs of one spread on the broker (optional)
+}
+
+// SpreadLeg pairs a leg with its transaction side. Used to price the whole
+// spread's margin as a single hedged basket.
+type SpreadLeg struct {
+	Leg  Leg
+	Side string // BUY | SELL
 }
 
 // MarketData provides the underlying prices the strategy needs.
@@ -38,4 +46,18 @@ type Broker interface {
 	// (points), a broker order reference and an error.
 	Buy(ctx context.Context, underlying string, leg Leg) (price float64, ref string, err error)
 	Sell(ctx context.Context, underlying string, leg Leg) (price float64, ref string, err error)
+}
+
+// FundsProvider is implemented by brokers that can report the account's real
+// tradable equity. Live mode uses it so sizing is driven by broker cash rather
+// than a hard-coded initial capital; paper brokers do not implement it.
+type FundsProvider interface {
+	AvailableEquity(ctx context.Context) (float64, error)
+}
+
+// MarginProvider is implemented by brokers that can price the broker-side margin
+// for a hedged spread basket. Live mode uses it to record the true margin and to
+// gate an entry on sufficient funds; paper brokers do not implement it.
+type MarginProvider interface {
+	SpreadMargin(ctx context.Context, underlying string, legs []SpreadLeg) (float64, error)
 }

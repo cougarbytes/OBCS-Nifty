@@ -176,10 +176,19 @@ type OrderRequest struct {
 	Exchange        string // NFO
 	Quantity        int
 	ProductType     string // CARRYFORWARD for overnight
+	OrderTag        string // groups the legs of one spread (optional)
 }
 
-// PlaceOrder submits a market order and returns the broker order id.
-func (c *Client) PlaceOrder(ctx context.Context, o OrderRequest) (string, error) {
+// OrderAck is the pair of identifiers returned when an order is accepted. The
+// orderid is the broker-visible reference; the uniqueorderid is what the order
+// status API is keyed on.
+type OrderAck struct {
+	OrderID       string
+	UniqueOrderID string
+}
+
+// PlaceOrder submits a market order and returns the broker order identifiers.
+func (c *Client) PlaceOrder(ctx context.Context, o OrderRequest) (OrderAck, error) {
 	body := map[string]string{
 		"variety":         "NORMAL",
 		"tradingsymbol":   o.TradingSymbol,
@@ -191,17 +200,136 @@ func (c *Client) PlaceOrder(ctx context.Context, o OrderRequest) (string, error)
 		"duration":        "DAY",
 		"quantity":        strconv.Itoa(o.Quantity),
 	}
+	if o.OrderTag != "" {
+		body["ordertag"] = o.OrderTag
+	}
 	res, err := c.do(ctx, http.MethodPost,
 		"/rest/secure/angelbroking/order/v1/placeOrder", body, true)
 	if err != nil {
-		return "", err
+		return OrderAck{}, err
 	}
 	if ok, _ := res["status"].(bool); !ok {
-		return "", fmt.Errorf("place order failed: %v", res["message"])
+		return OrderAck{}, fmt.Errorf("place order failed: %v", res["message"])
 	}
 	data, _ := res["data"].(map[string]any)
 	id, _ := data["orderid"].(string)
-	return id, nil
+	uid, _ := data["uniqueorderid"].(string)
+	return OrderAck{OrderID: id, UniqueOrderID: uid}, nil
+}
+
+// OrderDetail is the settled state of one order from the individual order
+// status API, keyed on the uniqueorderid returned by PlaceOrder.
+type OrderDetail struct {
+	Status       string  // "complete" | "rejected" | "cancelled" | "open" | ...
+	AveragePrice float64 // true average fill price (points)
+	FilledShares int
+}
+
+// OrderStatus fetches the settled state of a single order. Use AveragePrice for
+// the true fill instead of approximating with a post-order LTP.
+func (c *Client) OrderStatus(ctx context.Context, uniqueOrderID string) (OrderDetail, error) {
+	res, err := c.do(ctx, http.MethodGet,
+		"/rest/secure/angelbroking/order/v1/details/"+uniqueOrderID, nil, true)
+	if err != nil {
+		return OrderDetail{}, err
+	}
+	if ok, _ := res["status"].(bool); !ok {
+		return OrderDetail{}, fmt.Errorf("order status failed: %v", res["message"])
+	}
+	data, _ := res["data"].(map[string]any)
+	status, _ := data["status"].(string)
+	if status == "" {
+		status, _ = data["orderstatus"].(string)
+	}
+	return OrderDetail{
+		Status:       status,
+		AveragePrice: toFloat(data["averageprice"]),
+		FilledShares: int(toFloat(data["filledshares"])),
+	}, nil
+}
+
+// Funds is the account's RMS (Risk Management System) funds/margin snapshot.
+type Funds struct {
+	Net                    float64 // total net available funds
+	AvailableCash          float64 // free cash usable for new trades
+	AvailableIntradayPayin float64
+	Collateral             float64
+	UtilisedDebits         float64
+}
+
+// Funds fetches the live RMS limit (funds & margin) for the account. This is the
+// authoritative source of the account's tradable equity in live mode.
+func (c *Client) Funds(ctx context.Context) (Funds, error) {
+	res, err := c.do(ctx, http.MethodGet,
+		"/rest/secure/angelbroking/user/v1/getRMS", nil, true)
+	if err != nil {
+		return Funds{}, err
+	}
+	if ok, _ := res["status"].(bool); !ok {
+		return Funds{}, fmt.Errorf("funds fetch failed: %v", res["message"])
+	}
+	data, _ := res["data"].(map[string]any)
+	return Funds{
+		Net:                    toFloat(data["net"]),
+		AvailableCash:          toFloat(data["availablecash"]),
+		AvailableIntradayPayin: toFloat(data["availableintradaypayin"]),
+		Collateral:             toFloat(data["collateral"]),
+		UtilisedDebits:         toFloat(data["utiliseddebits"]),
+	}, nil
+}
+
+// MarginPosition is one leg passed to the margin calculator batch API. Qty is in
+// units (lots * lot_size), not number of lots.
+type MarginPosition struct {
+	Exchange    string  // NFO
+	SymbolToken string  // scrip token
+	Qty         int     // units
+	TradeType   string  // BUY | SELL
+	ProductType string  // CARRYFORWARD | INTRADAY | ...
+	Price       float64 // 0 for a market order estimate
+}
+
+// MarginResult is the batch margin calculator response. TotalMarginRequired is
+// the net requirement for the whole basket after MarginBenefit (the reduction a
+// hedged position such as a spread earns).
+type MarginResult struct {
+	TotalMarginRequired float64
+	NetPremium          float64
+	SpanMargin          float64
+	MarginBenefit       float64
+}
+
+// RequiredMargin asks the broker to price the margin for a basket of positions.
+// Passing both spread legs together yields the true hedged requirement (a naked
+// short leg on its own would be far larger).
+func (c *Client) RequiredMargin(ctx context.Context, positions []MarginPosition) (MarginResult, error) {
+	pos := make([]map[string]any, 0, len(positions))
+	for _, p := range positions {
+		pos = append(pos, map[string]any{
+			"exchange":    p.Exchange,
+			"qty":         p.Qty,
+			"price":       p.Price,
+			"productType": nz(p.ProductType, "CARRYFORWARD"),
+			"token":       p.SymbolToken,
+			"tradeType":   p.TradeType,
+		})
+	}
+	res, err := c.do(ctx, http.MethodPost,
+		"/rest/secure/angelbroking/margin/v1/batch", map[string]any{"positions": pos}, true)
+	if err != nil {
+		return MarginResult{}, err
+	}
+	if ok, _ := res["status"].(bool); !ok {
+		return MarginResult{}, fmt.Errorf("margin calc failed: %v", res["message"])
+	}
+	data, _ := res["data"].(map[string]any)
+	comp, _ := data["marginComponents"].(map[string]any)
+	return MarginResult{
+		TotalMarginRequired: toFloat(data["totalMarginRequired"]),
+		NetPremium:          toFloat(comp["netPremium"]),
+		SpanMargin:          toFloat(comp["spanMargin"]),
+		MarginBenefit:       toFloat(comp["marginBenefit"]),
+	}, nil
 }
 
 func nz(v, def string) string {

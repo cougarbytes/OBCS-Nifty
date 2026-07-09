@@ -113,6 +113,17 @@ func (s *Store) UpdateStateMessage(ctx context.Context, equity float64, msg stri
 	return err
 }
 
+// UpdateEquity records the current equity without touching the status message.
+// Used by the periodic broker-funds sync so the last meaningful message (e.g.
+// the most recent entry/exit) is preserved.
+func (s *Store) UpdateEquity(ctx context.Context, equity float64) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE public.strategy_state
+		SET equity = $1, updated_at = now()
+		WHERE id = 1`, equity)
+	return err
+}
+
 // ── trades ───────────────────────────────────────────────────────────────────
 
 // InsertTrade creates a new open trade and returns its generated id.

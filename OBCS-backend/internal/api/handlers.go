@@ -222,11 +222,9 @@ func (s *Server) preview(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "market data unavailable"})
 		return
 	}
-	st, _ := s.store.GetState(ctx)
-	equity := st.Equity
-	if equity <= 0 {
-		equity = s.cfg.Strategy.InitialCapital
-	}
+	// Live mode reflects the connected broker's real available cash; paper mode
+	// carries the stored equity (falling back to configured initial capital).
+	equity := s.runner.AccountEquity(ctx)
 	aboveEMA := true
 	if s.cfg.Strategy.UseEMAFilter {
 		aboveEMA = spot >= strategy.EMA(closes, s.cfg.Strategy.EMAPeriod)

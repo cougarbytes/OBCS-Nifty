@@ -32,12 +32,17 @@ type Runner struct {
 	ist    *time.Location
 	log    *slog.Logger
 
-	mu      sync.Mutex
-	running bool
-	halted  bool
-	cancel  context.CancelFunc
-	done    chan struct{}
+	mu             sync.Mutex
+	running        bool
+	halted         bool
+	cancel         context.CancelFunc
+	done           chan struct{}
+	lastEquitySync time.Time
 }
+
+// equitySyncInterval throttles how often the live loop re-reads broker funds so
+// a 30s tick does not hammer the RMS API.
+const equitySyncInterval = 2 * time.Minute
 
 // New constructs a runner.
 func New(cfg *config.Config, store *db.Store, engine *strategy.Engine,
@@ -60,6 +65,64 @@ func (r *Runner) Running() bool {
 	return r.running
 }
 
+// resolveEquity returns the capital the strategy should size against. In live
+// mode it queries the connected broker's available cash (via the FundsProvider
+// interface); if that call fails, or in paper mode, it uses the stored equity
+// and finally the configured initial capital.
+func (r *Runner) resolveEquity(ctx context.Context, stored float64) float64 {
+	if fp, ok := r.brk.(broker.FundsProvider); ok {
+		if eq, err := fp.AvailableEquity(ctx); err != nil {
+			r.log.Warn("broker funds fetch failed; using stored equity", "err", err)
+		} else if eq > 0 {
+			return eq
+		}
+	}
+	if stored > 0 {
+		return stored
+	}
+	return r.cfg.Strategy.InitialCapital
+}
+
+// AccountEquity resolves the current tradable equity for read-only callers (e.g.
+// the preview endpoint), preferring the broker's live cash in live mode.
+func (r *Runner) AccountEquity(ctx context.Context) float64 {
+	st, _ := r.store.GetState(ctx)
+	return r.resolveEquity(ctx, st.Equity)
+}
+
+// refreshEquity periodically syncs the stored equity with the broker's real
+// available cash so the dashboard and the halt gate track the account between
+// entries/exits. Throttled to equitySyncInterval; a no-op in paper mode (no
+// FundsProvider) and when the strategy is not running.
+func (r *Runner) refreshEquity(ctx context.Context) {
+	fp, ok := r.brk.(broker.FundsProvider)
+	if !ok {
+		return
+	}
+
+	r.mu.Lock()
+	due := r.running && time.Since(r.lastEquitySync) >= equitySyncInterval
+	if due {
+		r.lastEquitySync = time.Now()
+	}
+	r.mu.Unlock()
+	if !due {
+		return
+	}
+
+	eq, err := fp.AvailableEquity(ctx)
+	if err != nil {
+		r.log.Warn("periodic equity refresh failed; keeping last known equity", "err", err)
+		return
+	}
+	if eq <= 0 {
+		return
+	}
+	if err := r.store.UpdateEquity(ctx, eq); err != nil {
+		r.log.Warn("persist refreshed equity failed", "err", err)
+	}
+}
+
 // Start launches the loop. Idempotent: a second call while running is a no-op.
 func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Lock()
@@ -72,16 +135,14 @@ func (r *Runner) Start(ctx context.Context) error {
 		return ErrHalted
 	}
 
-	// Seed equity with initial capital on first start.
+	// Seed equity: live mode uses the connected broker's real cash; paper mode
+	// carries the stored equity, falling back to configured initial capital.
 	st, err := r.store.GetState(ctx)
 	if err != nil {
 		r.mu.Unlock()
 		return err
 	}
-	equity := st.Equity
-	if equity <= 0 {
-		equity = r.cfg.Strategy.InitialCapital
-	}
+	equity := r.resolveEquity(ctx, st.Equity)
 	if err := r.store.StartStrategy(ctx, string(r.cfg.TradingMode), equity); err != nil {
 		r.mu.Unlock()
 		return err
@@ -91,6 +152,9 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.cancel = cancel
 	r.running = true
 	r.done = make(chan struct{})
+	// Equity was just seeded from the broker above; suppress an immediate
+	// re-fetch on the first loop tick.
+	r.lastEquitySync = time.Now()
 	r.mu.Unlock()
 
 	go r.loop(loopCtx)
@@ -137,6 +201,9 @@ func (r *Runner) loop(ctx context.Context) {
 
 // evaluate decides whether to enter or exit given the current IST time.
 func (r *Runner) evaluate(ctx context.Context) {
+	// Keep stored equity in step with the broker (live mode, throttled).
+	r.refreshEquity(ctx)
+
 	now := time.Now().In(r.ist)
 	openTrade, err := r.store.GetOpenTrade(ctx)
 	if err != nil {
