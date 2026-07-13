@@ -25,7 +25,6 @@ async function logout() {
           </span>
           <div class="leading-tight">
             <p class="text-sm font-bold tracking-tight">OBCS<span class="text-primary">·</span>Nifty</p>
-            <p class="text-[10px] uppercase tracking-wider text-muted-foreground">Overnight Bull Call Spread</p>
           </div>
         </NuxtLink>
         <div class="flex items-center gap-1">
