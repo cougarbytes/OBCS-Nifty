@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/obcs-nifty/backend/internal/config"
@@ -17,7 +19,10 @@ import (
 type Client struct {
 	cfg  config.AngelOneConfig
 	http *http.Client
-	jwt  string
+
+	mu      sync.RWMutex // guards jwt
+	jwt     string
+	loginMu sync.Mutex // serializes re-logins across concurrent callers
 }
 
 // New creates a client with sane HTTP timeouts.
@@ -28,7 +33,7 @@ func New(cfg config.AngelOneConfig) *Client {
 	}
 }
 
-func (c *Client) headers(withAuth bool) http.Header {
+func (c *Client) headers(jwt string) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "application/json")
@@ -38,26 +43,61 @@ func (c *Client) headers(withAuth bool) http.Header {
 	h.Set("X-ClientPublicIP", nz(c.cfg.PublicIP, nz(c.cfg.LocalIP, "127.0.0.1")))
 	h.Set("X-MACAddress", nz(c.cfg.MACAddr, "00:00:00:00:00:00"))
 	h.Set("X-PrivateKey", c.cfg.APIKey)
-	if withAuth && c.jwt != "" {
-		h.Set("Authorization", "Bearer "+c.jwt)
+	if jwt != "" {
+		h.Set("Authorization", "Bearer "+jwt)
 	}
 	return h
 }
 
+func (c *Client) token() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.jwt
+}
+
+func (c *Client) setToken(jwt string) {
+	c.mu.Lock()
+	c.jwt = jwt
+	c.mu.Unlock()
+}
+
+// do sends one request. When withAuth is set and the broker rejects the cached
+// session token, it re-logins and replays the request once — AngelOne
+// invalidates sessions daily (and on key resets or logins elsewhere), and this
+// process is long-lived.
 func (c *Client) do(ctx context.Context, method, path string, body any, withAuth bool) (map[string]any, error) {
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		reader = bytes.NewReader(b)
+		payload = b
+	}
+	jwt := ""
+	if withAuth {
+		jwt = c.token()
+	}
+	res, err := c.doOnce(ctx, method, path, payload, jwt)
+	if err != nil || !withAuth || !isSessionRejected(res) {
+		return res, err
+	}
+	if err := c.relogin(ctx, jwt); err != nil {
+		return nil, fmt.Errorf("re-login after token rejection: %w", err)
+	}
+	return c.doOnce(ctx, method, path, payload, c.token())
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte, jwt string) (map[string]any, error) {
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.cfg.BaseURL+path, reader)
 	if err != nil {
 		return nil, err
 	}
-	req.Header = c.headers(withAuth)
+	req.Header = c.headers(jwt)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -73,6 +113,35 @@ func (c *Client) do(ctx context.Context, method, path string, body any, withAuth
 		return nil, fmt.Errorf("decode response (%d): %w", resp.StatusCode, err)
 	}
 	return out, nil
+}
+
+// isSessionRejected reports whether the broker refused the session token
+// (daily expiry, key reset, login elsewhere) as opposed to a request-level
+// failure. SmartAPI signals this with AG8001/AG8002/AG8003.
+func isSessionRejected(res map[string]any) bool {
+	if ok, _ := res["status"].(bool); ok {
+		return false
+	}
+	code, _ := res["errorcode"].(string)
+	switch code {
+	case "AG8001", "AG8002", "AG8003": // invalid / expired / missing token
+		return true
+	}
+	msg, _ := res["message"].(string)
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "invalid token") || strings.Contains(msg, "token expired")
+}
+
+// relogin refreshes the session at most once per stale token: concurrent
+// callers that raced on the same expired jwt queue on loginMu, then find the
+// token already replaced and skip their own login attempt.
+func (c *Client) relogin(ctx context.Context, stale string) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	if c.token() != stale {
+		return nil
+	}
+	return c.Login(ctx)
 }
 
 // Login authenticates via password (MPIN) + TOTP and caches the JWT.
@@ -100,7 +169,7 @@ func (c *Client) Login(ctx context.Context) error {
 	if jwt == "" {
 		return fmt.Errorf("angelone login: empty jwt")
 	}
-	c.jwt = jwt
+	c.setToken(jwt)
 	return nil
 }
 

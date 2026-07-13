@@ -116,6 +116,63 @@ func TestOrderStatusParsesAverageFill(t *testing.T) {
 	}
 }
 
+func TestReloginOnSessionRejectedAndReplay(t *testing.T) {
+	// First LTP call is rejected with AG8001 (session invalidated); the client
+	// must re-login and replay the request with the fresh jwt.
+	var logins, ltpCalls int
+	var replayAuth string
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/user/v1/loginByPassword"):
+			logins++
+			io.WriteString(w, `{"status":true,"message":"SUCCESS","data":{"jwtToken":"fresh-jwt"}}`)
+		case strings.HasSuffix(r.URL.Path, "/order/v1/getLtpData"):
+			ltpCalls++
+			if ltpCalls == 1 {
+				io.WriteString(w, `{"status":false,"message":"Invalid Token","errorcode":"AG8001","data":null}`)
+				return
+			}
+			replayAuth = r.Header.Get("Authorization")
+			io.WriteString(w, `{"status":true,"message":"SUCCESS","data":{"ltp":24123.45}}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	// Valid base32 so totpNow succeeds during the re-login.
+	c.cfg.TOTPSecret = "JBSWY3DPEHPK3PXP"
+
+	ltp, err := c.LTP(context.Background(), "NSE", "Nifty 50", "99926000")
+	if err != nil {
+		t.Fatalf("LTP after relogin: %v", err)
+	}
+	if ltp != 24123.45 {
+		t.Errorf("ltp = %v, want 24123.45", ltp)
+	}
+	if logins != 1 || ltpCalls != 2 {
+		t.Errorf("logins=%d ltpCalls=%d, want 1 login and 2 ltp calls", logins, ltpCalls)
+	}
+	if replayAuth != "Bearer fresh-jwt" {
+		t.Errorf("replay Authorization = %q, want Bearer fresh-jwt", replayAuth)
+	}
+}
+
+func TestNoReloginOnBusinessError(t *testing.T) {
+	// A non-session failure (e.g. RMS rejection) must not trigger a login.
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/user/v1/loginByPassword") {
+			t.Error("unexpected re-login on business error")
+			return
+		}
+		io.WriteString(w, `{"status":false,"message":"Insufficient funds","errorcode":"AB1004","data":null}`)
+	}))
+	defer srv.Close()
+
+	if _, err := c.LTP(context.Background(), "NSE", "Nifty 50", "99926000"); err == nil {
+		t.Fatal("expected error on status=false, got nil")
+	}
+}
+
 func TestPlaceOrderTagsAndReturnsAck(t *testing.T) {
 	var gotTag string
 	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
