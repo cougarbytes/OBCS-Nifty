@@ -1,12 +1,20 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+import tailwindcss from '@tailwindcss/vite'
+
 export default defineNuxtConfig({
   ssr: false, // <--- Add this to fix the Docker NAT loopback issue
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
 
-  modules: ['@nuxtjs/supabase', '@nuxtjs/tailwindcss', '@nuxtjs/color-mode', '@nuxt/fonts'],
+  modules: ['@nuxtjs/supabase', '@nuxtjs/color-mode', '@nuxt/fonts'],
 
+  // Tailwind CSS v4 integrates through the Vite plugin (the old
+  // @nuxtjs/tailwindcss module is v3-only). Config is now CSS-first — see
+  // app/assets/css/tailwind.css (@import "tailwindcss" + @theme).
   css: ['~/assets/css/tailwind.css'],
+  vite: {
+    plugins: [tailwindcss()],
+  },
 
   colorMode: {
     classSuffix: '', // use `dark` / `light` classes (shadcn convention)
