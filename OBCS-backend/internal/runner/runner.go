@@ -42,7 +42,7 @@ type Runner struct {
 
 // equitySyncInterval throttles how often the live loop re-reads broker funds so
 // a 30s tick does not hammer the RMS API.
-const equitySyncInterval = 2 * time.Minute
+const equitySyncInterval = 60 * time.Minute
 
 // New constructs a runner.
 func New(cfg *config.Config, store *db.Store, engine *strategy.Engine,
