@@ -46,6 +46,8 @@ values at the *current* spot, fetched on demand from `GET /api/trades/:id/comput
 only when **Compare computed** is pressed in an expanded trade row, and are shown
 for comparison only — never written to the database.
 
+![Compare Table Component](../docs/Screenshot_20260718_225939.png)
+
 ### Data visualization notes
 
 The P&L chart deliberately avoids a dual-axis chart (a common charting mistake).
