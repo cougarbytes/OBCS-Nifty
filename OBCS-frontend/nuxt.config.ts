@@ -37,4 +37,9 @@ export default defineNuxtConfig({
       secure: process.env.NUXT_SUPABASE_COOKIE_SECURE !== 'false',
     },
   },
+
+  robots: {
+    disallow: '/',
+    blockAiBots: true
+  },
 })
