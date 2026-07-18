@@ -4,7 +4,12 @@ Overnight Bull Call Spread (OBCS) strategy automation for the NIFTY index — a
 full-stack app that ports the research model in `Backtest/simulator.py` into a
 live/paper trading system.
 
+`Main Dashboard`
 ![Dashboard](./docs/Screenshot_20260718_223705.png)
+
+`Backtest Simulations`
+![sim main](./docs/Screenshot_20260719_001350.png)
+![sim panel](./docs/Screenshot_20260719_001433.png)
 
 - **Backend:** Go + Gin — strategy engine, AngelOne SmartAPI client, NSE holiday
   scraper, strategy runner goroutine, OpenAPI docs. Single writer to the DB.
