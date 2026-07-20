@@ -167,7 +167,12 @@ func (r *Runner) Stop(ctx context.Context) error {
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
-		return nil
+		// The loop isn't running in this process, but a prior crash/restart may
+		// have left strategy_state at 'running' (StopStrategy never ran on the
+		// way down). Reconcile it so the dashboard isn't wedged showing "Running"
+		// with a Stop button that no-ops. StopStrategy's `WHERE status =
+		// 'running'` makes this a safe no-op when the state is already consistent.
+		return r.store.StopStrategy(ctx)
 	}
 	r.cancel()
 	done := r.done

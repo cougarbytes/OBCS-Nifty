@@ -26,6 +26,7 @@ import (
 	"github.com/obcs-nifty/backend/internal/config"
 	"github.com/obcs-nifty/backend/internal/db"
 	"github.com/obcs-nifty/backend/internal/holidays"
+	"github.com/obcs-nifty/backend/internal/models"
 	"github.com/obcs-nifty/backend/internal/runner"
 	"github.com/obcs-nifty/backend/internal/strategy"
 )
@@ -84,6 +85,17 @@ func run(log *slog.Logger) error {
 
 	// ── strategy runner (separate goroutine on Start) ─────────────────────────
 	run := runner.New(cfg, store, engine, md, brk, log)
+
+	// Reconcile a stale 'running' state left by a crash/restart: the loop is not
+	// running in this fresh process, so an uncorrected status would show
+	// "Running" on the dashboard with Start/Stop both wedged. We deliberately do
+	// NOT auto-resume (a live strategy must not restart trading unattended).
+	if st, err := store.GetState(ctx); err == nil && st.Status == models.StatusRunning {
+		log.Warn("found stale 'running' strategy state on boot; reconciling to stopped")
+		if err := store.StopStrategy(ctx); err != nil {
+			log.Warn("reconcile stale strategy state failed", "err", err)
+		}
+	}
 
 	// ── HTTP server ────────────────────────────────────────────────────────────
 	allowedSub, _ := store.SeededUserID(ctx) // bind API access to the app user
