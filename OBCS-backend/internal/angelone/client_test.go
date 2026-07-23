@@ -56,7 +56,7 @@ func TestFundsErrorsOnStatusFalse(t *testing.T) {
 
 func TestRequiredMarginSendsBasketAndParses(t *testing.T) {
 	var gotPositions int
-	var gotToken, gotTradeType string
+	var gotToken, gotTradeType, gotOrderType string
 	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/margin/v1/batch") {
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -69,6 +69,7 @@ func TestRequiredMarginSendsBasketAndParses(t *testing.T) {
 		if len(body.Positions) > 1 {
 			gotToken, _ = body.Positions[1]["token"].(string)
 			gotTradeType, _ = body.Positions[1]["tradeType"].(string)
+			gotOrderType, _ = body.Positions[1]["orderType"].(string)
 		}
 		io.WriteString(w, `{"status":true,"message":"SUCCESS","data":{
 			"totalMarginRequired":29612.35,
@@ -88,6 +89,9 @@ func TestRequiredMarginSendsBasketAndParses(t *testing.T) {
 	}
 	if gotToken != "67308" || gotTradeType != "SELL" {
 		t.Errorf("short leg = token %q %q, want 67308 SELL", gotToken, gotTradeType)
+	}
+	if gotOrderType != "MARKET" {
+		t.Errorf("orderType = %q, want MARKET", gotOrderType)
 	}
 	if res.TotalMarginRequired != 29612.35 {
 		t.Errorf("TotalMarginRequired = %v, want 29612.35", res.TotalMarginRequired)

@@ -110,7 +110,15 @@ func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte
 	}
 	var out map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode response (%d): %w", resp.StatusCode, err)
+		// A non-JSON body is a gateway/WAF response (e.g. a 403 "Access Denied"
+		// page), not an application-level error. Surface the HTTP status and a
+		// body snippet so the real cause is visible instead of a cryptic
+		// "invalid character" decode error.
+		snippet := strings.TrimSpace(string(raw))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("http %d from %s: non-JSON response: %s", resp.StatusCode, path, snippet)
 	}
 	return out, nil
 }
@@ -381,6 +389,7 @@ func (c *Client) RequiredMargin(ctx context.Context, positions []MarginPosition)
 			"productType": nz(p.ProductType, "CARRYFORWARD"),
 			"token":       p.SymbolToken,
 			"tradeType":   p.TradeType,
+			"orderType":   "MARKET", // required by the batch API; legs are market orders
 		})
 	}
 	res, err := c.do(ctx, http.MethodPost,
