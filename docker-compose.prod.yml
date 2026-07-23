@@ -200,7 +200,7 @@ services:
       AO_CLIENT_CODE: ${AO_CLIENT_CODE:-}
       AO_MPIN: ${AO_MPIN:-}
       AO_TOTP_SECRET: ${AO_TOTP_SECRET:-}
-      AO_BASE_URL: ${AO_BASE_URL:-https://apiconnect.angelbroking.com}
+      AO_BASE_URL: ${AO_BASE_URL:-https://apiconnect.angelone.in}
       STRAT_UNDERLYING: ${STRAT_UNDERLYING:-NIFTY}
       STRAT_LOT_SIZE: ${STRAT_LOT_SIZE:-65}
       STRAT_LOTS: ${STRAT_LOTS:-2}
@@ -211,6 +211,8 @@ services:
       STRAT_USE_EMA: ${STRAT_USE_EMA:-false}
       STRAT_USE_AGC: ${STRAT_USE_AGC:-false}
       STRAT_ENABLE_COSTS: ${STRAT_ENABLE_COSTS:-true}
+      STRAT_ENTRY_TIME: ${STRAT_ENTRY_TIME:-15:20}
+      STRAT_EXIT_TIME: ${STRAT_EXIT_TIME:-09:20}
 
   frontend:
     build:

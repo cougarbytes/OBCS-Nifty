@@ -168,7 +168,7 @@ func Load() (*Config, error) {
 			ClientCode: os.Getenv("AO_CLIENT_CODE"),
 			MPIN:       os.Getenv("AO_MPIN"),
 			TOTPSecret: os.Getenv("AO_TOTP_SECRET"),
-			BaseURL:    getenv("AO_BASE_URL", "https://apiconnect.angelbroking.com"),
+			BaseURL:    getenv("AO_BASE_URL", "https://apiconnect.angelone.in"),
 			LocalIP:    getenv("AO_LOCAL_IP", "127.0.0.1"),
 			PublicIP:   os.Getenv("AO_PUBLIC_IP"),
 			MACAddr:    os.Getenv("AO_MAC_ADDR"),
