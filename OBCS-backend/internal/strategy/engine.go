@@ -188,20 +188,25 @@ func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA b
 	}
 
 	desired := e.p.Lots
-	if e.p.UseAGC && len(recentReturns) >= e.p.AGCWindow {
+	agcLive := e.p.UseAGC && len(recentReturns) >= e.p.AGCWindow
+	if agcLive {
 		window := recentReturns
 		if len(window) > e.p.AGCWindow {
 			window = window[len(window)-e.p.AGCWindow:]
 		}
 		kf := KellyFraction(window, e.p.KellyMult)
 		plan.KellyF = kf
-		if kf > 0 {
-			desired = int(kf * equity / debitPerLot)
-		} else {
-			desired = 1
-		}
+		desired = LotsFromFraction(kf, equity, debitPerLot)
 	}
 	nLots := SizeLots(desired, e.p.MaxLots, affordable)
+	if nLots < 1 {
+		if agcLive && plan.KellyF <= 0 {
+			plan.Reason = "kelly_zero"
+		} else {
+			plan.Reason = "size_zero"
+		}
+		return plan
+	}
 	plan.Lots = nLots
 	plan.MarginUsed = debitPerLot * float64(nLots)
 

@@ -1,5 +1,7 @@
 package strategy
 
+import "math"
+
 // kellyFCap is the absolute ceiling on the capital fraction at risk. Mirrors
 // simulator._KELLY_F_CAP.
 const kellyFCap = 0.60
@@ -48,21 +50,23 @@ func AffordableLots(equity, debitPerLot float64) int {
 	return int(equity / debitPerLot)
 }
 
-// SizeLots resolves the final lot count from the sizing inputs, clamping to the
-// affordability gate and the configured maximum, with a floor of one lot.
+// LotsFromFraction is the desired lot count from the Kelly fraction, rounded
+// to NEAREST. Truncation under-bets above one lot and, once floored, over-bets
+// below it: expected log-growth is a downward parabola centred on the exact
+// desired count, so the nearer integer wins. No floors — 0 means take no
+// position. Mirrors simulator.lots_from_fraction.
+func LotsFromFraction(kellyF, equity, debitPerLot float64) int {
+	if kellyF <= 0 || equity <= 0 || debitPerLot <= 0 {
+		return 0
+	}
+	// math.Round is half-away-from-zero; the guard keeps the argument strictly
+	// positive, where that equals the simulator's half-up floor(x+0.5).
+	return int(math.Round(kellyF * equity / debitPerLot))
+}
+
+// SizeLots clamps the desired lot count to the configured maximum and the
+// affordability gate; 0 is never promoted to 1 — a zero-lot signal means take
+// no position. Mirrors simulator.size_lots.
 func SizeLots(desired, maxLots, affordable int) int {
-	n := desired
-	if n < 1 {
-		n = 1
-	}
-	if n > maxLots {
-		n = maxLots
-	}
-	if n > affordable {
-		n = affordable
-	}
-	if n < 1 {
-		n = 1
-	}
-	return n
+	return max(0, min(desired, maxLots, affordable))
 }
