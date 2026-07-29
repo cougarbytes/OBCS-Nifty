@@ -230,7 +230,10 @@ func (s *Server) preview(c *gin.Context) {
 		aboveEMA = spot >= strategy.EMA(closes, s.cfg.Strategy.EMAPeriod)
 	}
 	recent, _ := s.store.RecentReturns(ctx, s.cfg.Strategy.AGCWindow, string(s.cfg.TradingMode))
-	plan := s.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, time.Now().In(config.IST()))
+	// The preview never touches the broker's margin API; 0 selects the
+	// premium-multiple fallback, so a live entry re-sized on the broker's real
+	// per-lot margin may carry fewer lots than previewed here.
+	plan := s.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, time.Now().In(config.IST()), 0)
 	c.JSON(http.StatusOK, gin.H{"plan": plan, "data_source": s.md.Source()})
 }
 

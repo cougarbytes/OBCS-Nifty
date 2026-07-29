@@ -75,6 +75,11 @@ type StrategyConfig struct {
 	KellyMult float64
 	AGCWindow int
 	MaxLots   int
+	// PremiumMarginMult estimates the capital blocked per lot as a multiple of
+	// the premium debit when no broker margin figure is available (paper mode,
+	// preview, margin API failure). 1.0 = premium-based sizing (simulator
+	// parity); values below 1 are treated as 1.
+	PremiumMarginMult float64
 
 	// Cost model (Indian retail option round trip).
 	EnableCosts       bool
@@ -197,6 +202,7 @@ func Load() (*Config, error) {
 			KellyMult:         getenvFloat("STRAT_KELLY_MULT", 0.5),
 			AGCWindow:         getenvInt("STRAT_AGC_WINDOW", 30),
 			MaxLots:           getenvInt("STRAT_MAX_LOTS", 10),
+			PremiumMarginMult: getenvFloat("STRAT_PREMIUM_MARGIN_MULT", 1.0),
 			EnableCosts:       getenvBool("STRAT_ENABLE_COSTS", true),
 			SlippagePts:       getenvFloat("STRAT_SLIPPAGE_PTS", 0.10),
 			BrokeragePerOrder: getenvFloat("STRAT_BROKERAGE_PER_ORDER", 20.0),

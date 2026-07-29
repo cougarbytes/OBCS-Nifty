@@ -231,21 +231,26 @@ func (s *Store) GetOpenTrade(ctx context.Context) (*models.Trade, error) {
 	return &ts[0], nil
 }
 
-// RecentReturns returns the last n closed-trade return-on-risk values (oldest
-// first) for Kelly sizing, scoped to the given trading mode.
+// RecentReturns returns the last n closed-trade return-on-capital values
+// (oldest first) for Kelly sizing, scoped to the given trading mode.
 //
-// The return is normalized by the premium DEBIT (entry_debit * lot_size * lots),
-// not margin_used, so it reproduces the simulator's per-trade `ret_risk`
-// (pnl_lot / debit_rs_per_lot). In live mode margin_used carries the broker's
-// SPAN+exposure hedged margin — a different, larger base — which would inflate
-// the Kelly fraction and break sizing (which is itself debit-based). Filtering
-// by mode also prevents a paper/live mix from blending incompatible bases.
+// The return is normalized by margin_used — the capital actually blocked for
+// the trade (broker SPAN+exposure hedged margin in live mode, premium debit in
+// paper mode) — so the Kelly window shares one base with the sizing
+// denominator (strategy.EntryPlan.CapitalPerLot): KellyFraction estimates the
+// edge per rupee blocked and LotsFromFraction divides equity by rupees blocked
+// per lot. Normalizing here by premium while sizing divides by margin would
+// inflate live lot counts by the margin/premium ratio. The premium expression
+// remains only as a fallback for rows without a stored margin. Filtering by
+// mode keeps the two capital bases (paper premium vs live margin) from
+// blending in one window.
 func (s *Store) RecentReturns(ctx context.Context, n int, mode string) ([]float64, error) {
 	if n <= 0 {
 		n = 30
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT CASE WHEN entry_debit > 0 AND lot_size > 0 AND lots > 0
+		SELECT CASE WHEN margin_used > 0 THEN net_pnl / margin_used
+		            WHEN entry_debit > 0 AND lot_size > 0 AND lots > 0
 		            THEN net_pnl / (entry_debit * lot_size * lots) ELSE 0 END AS r
 		FROM public.trades
 		WHERE status = 'closed' AND net_pnl IS NOT NULL AND trading_mode = $2

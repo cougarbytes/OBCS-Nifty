@@ -46,36 +46,65 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 	}
 
 	now := time.Now().In(r.ist)
-	plan := r.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, now)
+	underlying := r.cfg.Strategy.Underlying
+
+	// Two-phase sizing: a dry plan on the premium fallback fixes the strikes
+	// and expiry, then the broker prices ONE lot of that spread and the final
+	// plan re-sizes on the capital actually blocked. Kelly and the
+	// affordability gate then divide by the rupees the account loses access
+	// to, not the (smaller) premium debit.
+	dry := r.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, now, 0)
+	if !dry.ShouldEnter && !dry.SizingFailure() {
+		// Hard gate (trend filter, degenerate debit): no margin figure can
+		// revive this entry, and the plan may not even carry strikes.
+		return r.noEntry(ctx, equity, dry.Reason)
+	}
+
+	marginPerLot := 0.0
+	if mp, ok := r.brk.(broker.MarginProvider); ok {
+		oneLot := r.cfg.Strategy.LotSize
+		basket := []broker.SpreadLeg{
+			{Leg: broker.Leg{Strike: dry.K1, Expiry: dry.Expiry, OptionType: "CE", Qty: oneLot}, Side: "BUY"},
+			{Leg: broker.Leg{Strike: dry.K2, Expiry: dry.Expiry, OptionType: "CE", Qty: oneLot}, Side: "SELL"},
+		}
+		if m, err := mp.SpreadMargin(ctx, underlying, basket); err != nil {
+			r.log.Warn("per-lot margin unavailable; sizing on premium fallback", "err", err)
+		} else if m > 0 {
+			marginPerLot = m
+		}
+	}
+
+	plan := dry
+	if marginPerLot > 0 {
+		plan = r.engine.ComputeEntry(closes, spot, equity, aboveEMA, recent, now, marginPerLot)
+	}
 	if !plan.ShouldEnter {
-		_ = r.store.UpdateStateMessage(ctx, equity, "no entry: "+plan.Reason)
-		r.log.Info("no entry", "reason", plan.Reason)
-		return nil
+		return r.noEntry(ctx, equity, plan.Reason)
 	}
 
 	qty := plan.Lots * r.cfg.Strategy.LotSize
 	// Tag both legs with a shared id so the spread is identifiable as one hedged
 	// basket on the broker (AngelOne has no atomic multi-leg order).
 	tag := fmt.Sprintf("OBCS%d", now.Unix())
-	underlying := r.cfg.Strategy.Underlying
 	longLeg := broker.Leg{Strike: plan.K1, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C1Exec, Tag: tag}
 	shortLeg := broker.Leg{Strike: plan.K2, Expiry: plan.Expiry, OptionType: "CE", Qty: qty, ModelPrice: plan.C2Exec, Tag: tag}
 
-	// Pre-trade margin gate (live): price the whole spread as one hedged basket
-	// and refuse to open if the broker requirement exceeds available cash. This
-	// keeps the recorded margin honest and avoids a partial fill on rejection.
+	// Final pre-trade margin gate (live): price the sized basket as one hedged
+	// unit and refuse to open if the broker requirement exceeds available cash.
+	// Per-lot margin scales linearly for identical spreads, but the broker's
+	// own total is authoritative — it keeps the recorded margin honest and
+	// avoids a partial fill on rejection.
 	brokerMargin := 0.0
 	if mp, ok := r.brk.(broker.MarginProvider); ok {
 		basket := []broker.SpreadLeg{{Leg: longLeg, Side: "BUY"}, {Leg: shortLeg, Side: "SELL"}}
 		if m, err := mp.SpreadMargin(ctx, underlying, basket); err != nil {
-			r.log.Warn("spread margin check failed; proceeding on debit estimate", "err", err)
+			r.log.Warn("spread margin check failed; proceeding on sized estimate", "err", err)
 		} else {
 			brokerMargin = m
 			if m > equity {
-				msg := fmt.Sprintf("no entry: required margin %.2f exceeds available equity %.2f", m, equity)
-				_ = r.store.UpdateStateMessage(ctx, equity, msg)
 				r.log.Warn("insufficient margin", "required", m, "equity", equity)
-				return nil
+				return r.noEntry(ctx, equity,
+					fmt.Sprintf("required margin %.2f exceeds available equity %.2f", m, equity))
 			}
 		}
 	}
@@ -99,11 +128,15 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 	}
 
 	entryDebit := longFill - shortFill
-	// Record the broker's true hedged margin when available; otherwise the
-	// debit is the spread's capital at risk (max loss for a debit spread).
+	// Record the capital actually blocked: the broker's own total for the sized
+	// basket when available, else the per-lot figure scaled by lots, else the
+	// executed premium debit (max loss for a debit spread — paper mode lands
+	// here). This is the Kelly denominator db.RecentReturns reads back.
 	marginUsed := entryDebit * float64(r.cfg.Strategy.LotSize) * float64(plan.Lots)
 	if brokerMargin > 0 {
 		marginUsed = brokerMargin
+	} else if marginPerLot > 0 {
+		marginUsed = marginPerLot * float64(plan.Lots)
 	}
 
 	kelly := plan.KellyF
@@ -138,6 +171,13 @@ func (r *Runner) Enter(ctx context.Context, force bool) error {
 	_ = r.store.UpdateStateMessage(ctx, equity,
 		fmt.Sprintf("entered %s spread K1=%d K2=%d lots=%d debit=%.2f", trade.Underlying, plan.K1, plan.K2, plan.Lots, entryDebit))
 	r.log.Info("entered trade", "id", id, "k1", plan.K1, "k2", plan.K2, "lots", plan.Lots, "debit", entryDebit)
+	return nil
+}
+
+// noEntry records a skipped entry and lets the scheduler loop continue.
+func (r *Runner) noEntry(ctx context.Context, equity float64, reason string) error {
+	_ = r.store.UpdateStateMessage(ctx, equity, "no entry: "+reason)
+	r.log.Info("no entry", "reason", reason)
 	return nil
 }
 
@@ -269,13 +309,18 @@ func daysToExpiry(trade *models.Trade) int {
 }
 
 func planFromTrade(trade *models.Trade) strategy.EntryPlan {
+	capPerLot := 0.0
+	if trade.Lots > 0 {
+		capPerLot = trade.MarginUsed / float64(trade.Lots)
+	}
 	return strategy.EntryPlan{
-		K1:          trade.K1,
-		K2:          trade.K2,
-		DTE:         daysToExpiry(trade),
-		SigmaATM:    trade.SigmaATM,
-		EntryDebit:  trade.EntryDebit,
-		DebitPerLot: trade.EntryDebit * float64(trade.LotSize),
-		Lots:        trade.Lots,
+		K1:            trade.K1,
+		K2:            trade.K2,
+		DTE:           daysToExpiry(trade),
+		SigmaATM:      trade.SigmaATM,
+		EntryDebit:    trade.EntryDebit,
+		DebitPerLot:   trade.EntryDebit * float64(trade.LotSize),
+		CapitalPerLot: capPerLot,
+		Lots:          trade.Lots,
 	}
 }

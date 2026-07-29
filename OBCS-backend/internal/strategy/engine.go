@@ -34,6 +34,12 @@ type Params struct {
 	AGCWindow int
 	MaxLots   int
 
+	// PremiumMarginMult estimates the capital blocked per lot as a multiple of
+	// the premium debit when ComputeEntry is given no broker margin figure
+	// (paper mode, preview, margin API failure). Values below 1 are treated as
+	// 1: a debit spread never blocks less than its premium.
+	PremiumMarginMult float64
+
 	Costs CostParams
 }
 
@@ -57,24 +63,51 @@ func netGreeks(long, short Greeks) Greeks {
 	}
 }
 
+// Entry rejection reasons. The sizing gates depend on the capital-per-lot
+// denominator; the hard gates do not (see EntryPlan.SizingFailure).
+const (
+	reasonEMAFilter     = "ema_filter: spot below EMA"
+	reasonBadDebit      = "non-positive entry debit"
+	reasonAffordability = "affordability: equity cannot fund one lot"
+	reasonKellyZero     = "kelly_zero"
+	reasonSizeZero      = "size_zero"
+)
+
 // EntryPlan is the fully-specified overnight trade the engine wants to open.
 type EntryPlan struct {
-	ShouldEnter bool         `json:"should_enter"`
-	Reason      string       `json:"reason,omitempty"`
-	EntrySpot   float64      `json:"entry_spot"`
-	K1          int          `json:"k1"`
-	K2          int          `json:"k2"`
-	DTE         int          `json:"dte_days"`
-	Expiry      time.Time    `json:"expiry"`
-	SigmaATM    float64      `json:"sigma_atm"`
-	C1Exec      float64      `json:"c1_exec"`       // slipped long-leg premium (points)
-	C2Exec      float64      `json:"c2_exec"`       // slipped short-leg premium (points)
-	EntryDebit  float64      `json:"entry_debit"`   // net premium in points
-	DebitPerLot float64      `json:"debit_per_lot"` // rupees
-	Lots        int          `json:"lots"`
-	MarginUsed  float64      `json:"margin_used"` // rupees of premium at risk
-	KellyF      float64      `json:"kelly_f"`
-	Greeks      SpreadGreeks `json:"greeks"` // model (computed) Greeks at entry
+	ShouldEnter bool      `json:"should_enter"`
+	Reason      string    `json:"reason,omitempty"`
+	EntrySpot   float64   `json:"entry_spot"`
+	K1          int       `json:"k1"`
+	K2          int       `json:"k2"`
+	DTE         int       `json:"dte_days"`
+	Expiry      time.Time `json:"expiry"`
+	SigmaATM    float64   `json:"sigma_atm"`
+	C1Exec      float64   `json:"c1_exec"`       // slipped long-leg premium (points)
+	C2Exec      float64   `json:"c2_exec"`       // slipped short-leg premium (points)
+	EntryDebit  float64   `json:"entry_debit"`   // net premium in points
+	DebitPerLot float64   `json:"debit_per_lot"` // rupees of premium per lot
+	// CapitalPerLot is the rupee capital blocked per lot — the broker's margin
+	// figure when one was supplied, else the premium-multiple fallback. It is
+	// the denominator for the affordability gate and Kelly sizing.
+	CapitalPerLot float64      `json:"capital_per_lot"`
+	Lots          int          `json:"lots"`
+	MarginUsed    float64      `json:"margin_used"` // CapitalPerLot * Lots, rupees
+	KellyF        float64      `json:"kelly_f"`
+	Greeks        SpreadGreeks `json:"greeks"` // model (computed) Greeks at entry
+}
+
+// SizingFailure reports whether a rejected plan fell only to a sizing gate
+// (affordability, Kelly) — gates whose outcome depends on the capital-per-lot
+// denominator, so re-running with the broker's real margin figure is
+// meaningful. Hard gates (trend filter, non-positive debit) return false: no
+// margin input can revive those, and their plans may lack strikes entirely.
+func (p EntryPlan) SizingFailure() bool {
+	switch p.Reason {
+	case reasonAffordability, reasonKellyZero, reasonSizeZero:
+		return true
+	}
+	return false
 }
 
 // ExitResult is the realized outcome of closing an overnight spread.
@@ -143,13 +176,19 @@ func (e *Engine) slippage() float64 {
 
 // ComputeEntry builds the trade plan at the entry window. `closes` is the
 // recent daily close series (most recent last), `spot` the current entry price,
-// `equity` the available capital and `aboveEMA` the trend-filter state. It
-// mirrors the per-bar entry logic of simulator.run_backtest.
-func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA bool, recentReturns []float64, entryDate time.Time) EntryPlan {
+// `equity` the available capital and `aboveEMA` the trend-filter state.
+// `marginPerLot` is the broker's margin requirement for ONE lot of the
+// candidate spread (rupees); pass 0 when unknown and the premium-multiple
+// fallback estimates it instead. The affordability gate and Kelly sizing both
+// divide by that capital-per-lot figure, so lots are sized against the rupees
+// the account actually loses access to, not just the premium. With
+// marginPerLot=0 and PremiumMarginMult<=1 this reproduces the premium-based
+// per-bar entry logic of simulator.run_backtest exactly.
+func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA bool, recentReturns []float64, entryDate time.Time, marginPerLot float64) EntryPlan {
 	plan := EntryPlan{EntrySpot: spot}
 
 	if e.p.UseEMAFilter && !aboveEMA {
-		plan.Reason = "ema_filter: spot below EMA"
+		plan.Reason = reasonEMAFilter
 		return plan
 	}
 
@@ -174,16 +213,22 @@ func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA b
 	plan.C1Exec, plan.C2Exec, plan.EntryDebit = c1Exec, c2Exec, entryDebit
 
 	if entryDebit <= 0 {
-		plan.Reason = "non-positive entry debit"
+		plan.Reason = reasonBadDebit
 		return plan
 	}
 
 	debitPerLot := entryDebit * float64(e.p.LotSize)
 	plan.DebitPerLot = debitPerLot
 
-	affordable := AffordableLots(equity, debitPerLot)
+	capPerLot := marginPerLot
+	if capPerLot <= 0 {
+		capPerLot = debitPerLot * math.Max(1.0, e.p.PremiumMarginMult)
+	}
+	plan.CapitalPerLot = capPerLot
+
+	affordable := AffordableLots(equity, capPerLot)
 	if affordable < 1 {
-		plan.Reason = "affordability: equity cannot fund one lot"
+		plan.Reason = reasonAffordability
 		return plan
 	}
 
@@ -196,19 +241,19 @@ func (e *Engine) ComputeEntry(closes []float64, spot, equity float64, aboveEMA b
 		}
 		kf := KellyFraction(window, e.p.KellyMult)
 		plan.KellyF = kf
-		desired = LotsFromFraction(kf, equity, debitPerLot)
+		desired = LotsFromFraction(kf, equity, capPerLot)
 	}
 	nLots := SizeLots(desired, e.p.MaxLots, affordable)
 	if nLots < 1 {
 		if agcLive && plan.KellyF <= 0 {
-			plan.Reason = "kelly_zero"
+			plan.Reason = reasonKellyZero
 		} else {
-			plan.Reason = "size_zero"
+			plan.Reason = reasonSizeZero
 		}
 		return plan
 	}
 	plan.Lots = nLots
-	plan.MarginUsed = debitPerLot * float64(nLots)
+	plan.MarginUsed = capPerLot * float64(nLots)
 
 	plan.Greeks = e.GreeksAt(spot, float64(k1), float64(k2), tIn, sigmaATM)
 	plan.ShouldEnter = true
@@ -242,9 +287,15 @@ func (e *Engine) ComputeExit(plan EntryPlan, exitSpot, elapsedDays float64) Exit
 	gross := (exitValue - plan.EntryDebit) * float64(e.p.LotSize) * float64(plan.Lots)
 	net := gross - costs
 
+	// Normalize on the same capital base the entry was sized against, so this
+	// return is directly comparable to the Kelly window (db.RecentReturns).
+	capPerLot := plan.CapitalPerLot
+	if capPerLot <= 0 {
+		capPerLot = plan.DebitPerLot
+	}
 	retRisk := 0.0
-	if plan.DebitPerLot > 0 {
-		retRisk = (net / float64(plan.Lots)) / plan.DebitPerLot
+	if capPerLot > 0 && plan.Lots > 0 {
+		retRisk = (net / float64(plan.Lots)) / capPerLot
 	}
 
 	return ExitResult{
