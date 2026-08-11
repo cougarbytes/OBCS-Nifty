@@ -161,6 +161,23 @@ func (s *Store) MarkTradeError(ctx context.Context, id, note string) error {
 	return err
 }
 
+// SetTradeRejection stores the broker's last rejection reason on the trade row.
+func (s *Store) SetTradeRejection(ctx context.Context, id, reason string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE public.trades SET rejection_reason = $2, updated_at = now()
+		WHERE id = $1`, id, reason)
+	return err
+}
+
+// UpdateTradeNote records a lifecycle breadcrumb (e.g. a partially executed
+// exit whose short leg is already covered) without changing the trade status.
+func (s *Store) UpdateTradeNote(ctx context.Context, id, note string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE public.trades SET note = $2, updated_at = now()
+		WHERE id = $1`, id, note)
+	return err
+}
+
 // ListTrades returns trades most-recent first, capped by limit.
 func (s *Store) ListTrades(ctx context.Context, limit int) ([]models.Trade, error) {
 	if limit <= 0 || limit > 500 {
@@ -171,7 +188,7 @@ func (s *Store) ListTrades(ctx context.Context, limit int) ([]models.Trade, erro
 		       contract_expiry, k1, k2, lots, lot_size, entry_spot, exit_spot,
 		       sigma_atm, entry_debit, exit_value, margin_used, gross_pnl, costs,
 		       net_pnl, kelly_f, COALESCE(broker_order_ref,''), COALESCE(note,''),
-		       created_at, updated_at
+		       COALESCE(rejection_reason,''), created_at, updated_at
 		FROM public.trades
 		ORDER BY entry_time DESC
 		LIMIT $1`, limit)
@@ -189,7 +206,7 @@ func (s *Store) GetTradeByID(ctx context.Context, id string) (*models.Trade, err
 		       contract_expiry, k1, k2, lots, lot_size, entry_spot, exit_spot,
 		       sigma_atm, entry_debit, exit_value, margin_used, gross_pnl, costs,
 		       net_pnl, kelly_f, COALESCE(broker_order_ref,''), COALESCE(note,''),
-		       created_at, updated_at
+		       COALESCE(rejection_reason,''), created_at, updated_at
 		FROM public.trades WHERE id = $1`, id)
 	if err != nil {
 		return nil, err
@@ -212,7 +229,7 @@ func (s *Store) GetOpenTrade(ctx context.Context) (*models.Trade, error) {
 		       contract_expiry, k1, k2, lots, lot_size, entry_spot, exit_spot,
 		       sigma_atm, entry_debit, exit_value, margin_used, gross_pnl, costs,
 		       net_pnl, kelly_f, COALESCE(broker_order_ref,''), COALESCE(note,''),
-		       created_at, updated_at
+		       COALESCE(rejection_reason,''), created_at, updated_at
 		FROM public.trades
 		WHERE status = 'open'
 		ORDER BY entry_time DESC
@@ -285,7 +302,7 @@ func scanTrades(rows pgx.Rows) ([]models.Trade, error) {
 			&t.ContractExpiry, &t.K1, &t.K2, &t.Lots, &t.LotSize, &t.EntrySpot,
 			&t.ExitSpot, &t.SigmaATM, &t.EntryDebit, &t.ExitValue, &t.MarginUsed,
 			&t.GrossPnL, &t.Costs, &t.NetPnL, &t.KellyF, &t.BrokerOrderRef,
-			&t.Note, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.Note, &t.RejectionReason, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.Status = models.TradeStatus(status)
@@ -293,6 +310,59 @@ func scanTrades(rows pgx.Rows) ([]models.Trade, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// ── order_rejections ─────────────────────────────────────────────────────────
+
+// RejectionState summarizes the retry budget consumed for one scope: an entry
+// session (IST day) or one trade's exit. The runner reads it before placing
+// leg orders and stands down once Attempts reaches its cap or Fatal is set.
+type RejectionState struct {
+	Attempts   int    // rejected/failed attempts recorded in scope
+	Fatal      bool   // an unwind failed, leaving a naked leg at the broker
+	LastReason string // most recent broker verdict text
+}
+
+// InsertOrderRejection persists one rejected/cancelled leg order with the
+// broker's reason. This is the durable retry counter, so a failed insert is a
+// real error the caller must surface (not swallow).
+func (s *Store) InsertOrderRejection(ctx context.Context, rj models.OrderRejection) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO public.order_rejections
+		    (trade_id, phase, leg, side, attempt, broker_order_ref, reason, fatal, session_date)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		nullStr(rj.TradeID), rj.Phase, rj.Leg, rj.Side, rj.Attempt,
+		nullStr(rj.BrokerOrderRef), rj.Reason, rj.Fatal, rj.SessionDate)
+	return err
+}
+
+// EntryRejections returns the retry state for entry attempts on the given IST
+// session date (the entry window occurs once per trading day).
+func (s *Store) EntryRejections(ctx context.Context, sessionDate string) (RejectionState, error) {
+	var st RejectionState
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(bool_or(fatal), false),
+		       COALESCE((SELECT reason FROM public.order_rejections
+		                 WHERE phase = 'entry' AND session_date = $1
+		                 ORDER BY created_at DESC LIMIT 1), '')
+		FROM public.order_rejections
+		WHERE phase = 'entry' AND session_date = $1`, sessionDate).
+		Scan(&st.Attempts, &st.Fatal, &st.LastReason)
+	return st, err
+}
+
+// ExitRejections returns the retry state for exit attempts on one trade.
+func (s *Store) ExitRejections(ctx context.Context, tradeID string) (RejectionState, error) {
+	var st RejectionState
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(bool_or(fatal), false),
+		       COALESCE((SELECT reason FROM public.order_rejections
+		                 WHERE phase = 'exit' AND trade_id = $1
+		                 ORDER BY created_at DESC LIMIT 1), '')
+		FROM public.order_rejections
+		WHERE phase = 'exit' AND trade_id = $1`, tradeID).
+		Scan(&st.Attempts, &st.Fatal, &st.LastReason)
+	return st, err
 }
 
 // ── trade_option_data (LIVE snapshots only) ─────────────────────────────────

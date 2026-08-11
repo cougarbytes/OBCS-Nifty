@@ -61,10 +61,30 @@ type Trade struct {
 	KellyF         *float64    `json:"kelly_f,omitempty"`
 	BrokerOrderRef string      `json:"broker_order_ref,omitempty"`
 	Note           string      `json:"note,omitempty"`
-	CreatedAt      time.Time   `json:"created_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
+	// RejectionReason is the broker's last rejection verdict when an exit had
+	// to be abandoned after exhausting its retry budget.
+	RejectionReason string    `json:"rejection_reason,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 	// OptionData is the live option snapshot(s) for this trade (entry/exit).
 	OptionData []OptionData `json:"option_data,omitempty"`
+}
+
+// OrderRejection records one terminally rejected/cancelled leg order together
+// with the broker's reason text. Rows double as the durable retry budget:
+// entry attempts are scoped by SessionDate (IST), exit attempts by TradeID.
+type OrderRejection struct {
+	ID             string    `json:"id"`
+	TradeID        string    `json:"trade_id,omitempty"` // empty for entry-phase rejections (no trade row exists yet)
+	Phase          string    `json:"phase"`              // entry | exit
+	Leg            string    `json:"leg"`                // long | short
+	Side           string    `json:"side"`               // BUY | SELL
+	Attempt        int       `json:"attempt"`
+	BrokerOrderRef string    `json:"broker_order_ref,omitempty"`
+	Reason         string    `json:"reason"`
+	Fatal          bool      `json:"fatal"`        // an unwind failed, leaving a naked leg at the broker
+	SessionDate    string    `json:"session_date"` // YYYY-MM-DD (IST)
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // OptionData is a persisted LIVE option Greek snapshot for a trade leg.

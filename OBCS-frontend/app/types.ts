@@ -63,6 +63,11 @@ export interface Trade {
   gross_pnl?: number
   costs?: number
   net_pnl?: number
+  kelly_f?: number
+  broker_order_ref?: string
+  note?: string
+  /** Broker's last rejection verdict when an exit was abandoned after retries. */
+  rejection_reason?: string
   option_data?: OptionData[]
 }
 

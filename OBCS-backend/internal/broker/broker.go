@@ -7,10 +7,44 @@ package broker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/obcs-nifty/backend/internal/config"
 )
+
+// OrderRejectedError is returned when the broker terminally rejects or cancels
+// a leg's order. Reason carries the broker's own verdict text (e.g. an RMS,
+// liquidity or price-band message from the order-status API) so callers can
+// persist it and budget retries instead of blindly re-attempting.
+type OrderRejectedError struct {
+	OrderRef string // broker order id (may be empty if placement itself failed)
+	Status   string // "rejected" | "cancelled"
+	Reason   string // broker's rejection reason text ("" when not provided)
+}
+
+// Error implements the error interface.
+func (e *OrderRejectedError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("order %s %s", e.OrderRef, e.Status)
+	}
+	return fmt.Sprintf("order %s %s: %s", e.OrderRef, e.Status, e.Reason)
+}
+
+// RejectionReason extracts the broker's rejection reason from an error chain.
+// The second return is false when err does not contain a terminal order
+// rejection (e.g. a network failure or an unresolved scrip).
+func RejectionReason(err error) (string, bool) {
+	var rej *OrderRejectedError
+	if !errors.As(err, &rej) {
+		return "", false
+	}
+	if rej.Reason != "" {
+		return rej.Reason, true
+	}
+	return "order " + rej.Status + " (no reason provided by broker)", true
+}
 
 // Leg describes one option leg to execute.
 type Leg struct {

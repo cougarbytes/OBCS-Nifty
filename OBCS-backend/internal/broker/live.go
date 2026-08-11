@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -60,6 +61,12 @@ func (b *LiveBroker) execute(ctx context.Context, underlying string, leg Leg, si
 	// order falls back to the current LTP, then the model price.
 	price, done, err := b.settledFillPrice(ctx, ack.UniqueOrderID)
 	if err != nil {
+		// Stamp the broker order id onto a terminal rejection so the persisted
+		// reason can be reconciled against the broker's order book.
+		var rej *OrderRejectedError
+		if errors.As(err, &rej) {
+			rej.OrderRef = ack.OrderID
+		}
 		return 0, ack.OrderID, fmt.Errorf("order %s %s: %w", side, ack.OrderID, err)
 	}
 	if done {
@@ -91,7 +98,13 @@ func (b *LiveBroker) settledFillPrice(ctx context.Context, uniqueOrderID string)
 				}
 				return 0, false, nil
 			case "rejected", "cancelled", "canceled":
-				return 0, false, fmt.Errorf("order %s", strings.ToLower(d.Status))
+				// Terminal broker verdict: surface it as a typed error carrying
+				// the broker's reason text (d.Text) so the runner can persist
+				// why the leg failed and budget its retries.
+				return 0, false, &OrderRejectedError{
+					Status: strings.ToLower(d.Status),
+					Reason: d.Text,
+				}
 			}
 		}
 		select {

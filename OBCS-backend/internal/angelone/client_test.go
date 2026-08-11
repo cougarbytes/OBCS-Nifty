@@ -120,6 +120,28 @@ func TestOrderStatusParsesAverageFill(t *testing.T) {
 	}
 }
 
+func TestOrderStatusParsesRejectionText(t *testing.T) {
+	// A rejected order must surface the broker's verdict text so the runner can
+	// persist the rejection reason and budget its retries.
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":true,"message":"SUCCESS","data":{
+			"status":"rejected","averageprice":0,"filledshares":"0",
+			"text":" 17070 : The Price is out of the current execution range "}}`)
+	}))
+	defer srv.Close()
+
+	d, err := c.OrderStatus(context.Background(), "uid-2")
+	if err != nil {
+		t.Fatalf("OrderStatus: %v", err)
+	}
+	if d.Status != "rejected" {
+		t.Errorf("Status = %q, want rejected", d.Status)
+	}
+	if d.Text != "17070 : The Price is out of the current execution range" {
+		t.Errorf("Text = %q, want trimmed broker verdict", d.Text)
+	}
+}
+
 func TestReloginOnSessionRejectedAndReplay(t *testing.T) {
 	// First LTP call is rejected with AG8001 (session invalidated); the client
 	// must re-login and replay the request with the fresh jwt.

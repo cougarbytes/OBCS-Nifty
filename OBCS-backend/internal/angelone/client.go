@@ -300,6 +300,7 @@ type OrderDetail struct {
 	Status       string  // "complete" | "rejected" | "cancelled" | "open" | ...
 	AveragePrice float64 // true average fill price (points)
 	FilledShares int
+	Text         string // broker's verdict text, e.g. the RMS rejection reason
 }
 
 // OrderStatus fetches the settled state of a single order. Use AveragePrice for
@@ -318,10 +319,15 @@ func (c *Client) OrderStatus(ctx context.Context, uniqueOrderID string) (OrderDe
 	if status == "" {
 		status, _ = data["orderstatus"].(string)
 	}
+	// The broker's human-readable verdict lives in `text` (SmartAPI order book
+	// & details schema). On a rejection this is the reason the caller must
+	// persist, e.g. "17070 : The Price is out of the current execution range".
+	text, _ := data["text"].(string)
 	return OrderDetail{
 		Status:       status,
 		AveragePrice: toFloat(data["averageprice"]),
 		FilledShares: int(toFloat(data["filledshares"])),
+		Text:         strings.TrimSpace(text),
 	}, nil
 }
 

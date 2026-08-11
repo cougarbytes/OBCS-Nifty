@@ -84,6 +84,13 @@ components:
         gross_pnl: { type: number, nullable: true }
         costs: { type: number, nullable: true }
         net_pnl: { type: number, nullable: true }
+        kelly_f: { type: number, nullable: true }
+        broker_order_ref: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        rejection_reason:
+          type: string
+          nullable: true
+          description: Broker's last rejection verdict when an exit was abandoned after the retry budget was spent.
         option_data:
           type: array
           items: { $ref: '#/components/schemas/OptionData' }

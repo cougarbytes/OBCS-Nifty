@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Scale, X } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Scale, X, AlertTriangle, AlertOctagon } from 'lucide-vue-next'
 import type { Trade, OptionData, SpreadGreeks } from '~/types'
 
 const props = defineProps<{ trades: Trade[]; loading?: boolean }>()
@@ -135,7 +135,8 @@ function num(v?: number, d = 3): string {
             </UiTableCell>
             <UiTableCell>
               <UiBadge :variant="t.status === 'error' ? 'loss' : t.status === 'open' ? 'default' : 'secondary'">
-                {{ t.status }}
+                <span v-if="t.status === 'error'" class="flex items-center gap-1"><AlertTriangle class="h-3 w-3" /> Rejected</span>
+                <span v-else>{{ t.status }}</span>
               </UiBadge>
             </UiTableCell>
           </UiTableRow>
@@ -143,6 +144,33 @@ function num(v?: number, d = 3): string {
           <!-- Expanded option-data panel -->
           <tr v-if="expanded.has(t.id)" :id="`trade-${t.id}-details`">
             <td :colspan="COLSPAN" class="bg-muted/30 px-4 py-3">
+              <div v-if="t.status === 'error'" class="mb-4 bg-loss/10 p-4 border border-loss/20 rounded-md flex flex-col gap-3">
+                <div class="flex items-center justify-between border-b border-loss/20 pb-2">
+                  <div class="flex items-center gap-2 text-loss font-semibold text-xs">
+                    <AlertOctagon class="h-4 w-4" />
+                    <span>Broker Execution Failure Breakdown</span>
+                  </div>
+                  <!-- Position Health Indicator -->
+                  <UiBadge :variant="t.note?.includes('both legs still open') ? 'secondary' : 'loss'">
+                    Position Health: {{ t.note?.includes('both legs still open') ? '✅ FLAT (Hedged Spread)' : t.note?.includes('still open') ? '⚠️ UNHEDGED RISK' : 'UNKNOWN' }}
+                  </UiBadge>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div class="rounded bg-background/80 p-2.5 border border-border">
+                    <span class="text-muted-foreground block text-[10px] uppercase font-sans font-semibold mb-1">Broker API Response</span>
+                    <p class="text-loss font-semibold">{{ t.rejection_reason || 'Broker returned low liquidity / RMS restriction error' }}</p>
+                  </div>
+
+                  <div class="rounded bg-background/80 p-2.5 border border-border">
+                    <span class="text-muted-foreground block text-[10px] uppercase font-sans font-semibold mb-1">Retry Limit Status</span>
+                    <p class="text-foreground">Attempts: <span class="font-bold text-loss">3/3 Max Retries Reached</span></p>
+                    <p class="text-[11px] text-muted-foreground font-sans mt-0.5">Execution loop auto-stopped to prevent tick-by-tick brokerage & slippage charges.</p>
+                  </div>
+                </div>
+                <p class="text-[11px] text-loss/80 font-sans mt-1">Note: {{ t.note }}</p>
+              </div>
+
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <h4 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Option Greeks</h4>
                 <div class="flex items-center gap-2">

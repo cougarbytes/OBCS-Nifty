@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Wallet, TrendingUp, TrendingDown, Target, Layers } from 'lucide-vue-next'
+import { Wallet, TrendingUp, TrendingDown, Target, Layers, AlertOctagon } from 'lucide-vue-next'
 import type { StrategyState, Trade, DailyPnL, Holiday } from '~/types'
 
 definePageMeta({ middleware: 'auth' })
@@ -52,6 +52,8 @@ const winRate = computed(() => {
   return (wins / closed.value.length) * 100
 })
 const isRunning = computed(() => state.value?.status === 'running')
+
+const lastErrorTrade = computed(() => trades.value.find(t => t.status === 'error'))
 
 let channel: ReturnType<typeof supabase.channel> | null = null
 
@@ -106,6 +108,15 @@ useHead({ title: 'OBCS·Nifty — Dashboard' })
 
     <div v-if="loadError" role="alert" class="flex items-center gap-2 rounded-lg border border-loss/40 bg-loss/10 px-4 py-2 text-sm text-loss">
       ⚠ {{ loadError }}
+    </div>
+
+    <div v-if="lastErrorTrade" class="rounded-lg border border-loss/40 bg-loss/10 px-4 py-3 text-loss shadow-sm flex items-start gap-3">
+      <AlertOctagon class="h-5 w-5 shrink-0 mt-0.5" />
+      <div class="space-y-1">
+        <h4 class="font-semibold text-sm">⚠️ Strategy Auto-Stopped: Execution Retry Limit Exceeded (3/3)</h4>
+        <p class="text-xs text-loss/90 leading-relaxed">{{ lastErrorTrade.note }}</p>
+        <p v-if="lastErrorTrade.rejection_reason" class="text-xs font-mono mt-1 font-semibold opacity-90">Broker reason: {{ lastErrorTrade.rejection_reason }}</p>
+      </div>
     </div>
 
     <!-- Summary stat tiles -->
